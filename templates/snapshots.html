@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+
+{% block title %}Snapshots - Portfolio Tracker{% endblock %}
+
+{% block content %}
+<div class="snapshots-page">
+    <div class="page-header">
+        <div>
+            <h1>Snapshots</h1>
+            <p class="page-subtitle">Portfolio history and snapshots</p>
+        </div>
+        <button class="btn btn-primary" onclick="triggerAllSnapshots()">
+            <i class="fas fa-camera"></i> Take All Snapshots
+        </button>
+    </div>
+
+    <!-- Filters -->
+    <div class="card" style="margin-bottom: 24px;">
+        <div class="card-body">
+            <div class="filters-row">
+                <div class="filter-group">
+                    <label>Portfolio</label>
+                    <select id="portfolioFilter" class="form-select">
+                        <option value="">All Portfolios</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>From</label>
+                    <input type="date" id="dateFrom" class="form-control">
+                </div>
+                <div class="filter-group">
+                    <label>To</label>
+                    <input type="date" id="dateTo" class="form-control">
+                </div>
+                <div class="filter-actions">
+                    <button class="btn btn-primary" onclick="applyFilters()"><i class="fas fa-filter"></i> Apply</button>
+                    <button class="btn btn-ghost" onclick="clearFilters()">Clear</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Table -->
+    <div class="card">
+        <div class="card-header">
+            <h3><i class="fas fa-history"></i> Snapshot History</h3>
+            <span id="snapshotCount" class="badge">0</span>
+        </div>
+        <div class="card-body no-padding">
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Portfolio</th>
+                            <th>Value</th>
+                            <th>Assets</th>
+                            <th>Type</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="snapshotsTableBody">
+                        <tr><td colspan="6"><div class="loading-state"><div class="spinner"></div></div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Detail Modal -->
+<div id="snapshotDetailModal" class="modal">
+    <div class="modal-overlay"></div>
+    <div class="modal-content modal-medium">
+        <div class="modal-header">
+            <h2><i class="fas fa-camera"></i> Snapshot Details</h2>
+            <button class="modal-close" onclick="closeModal('snapshotDetailModal')"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="snapshot-summary">
+                <div class="summary-item">
+                    <span class="summary-label">Date</span>
+                    <span class="summary-value" id="snapshotDetailDate">-</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Value</span>
+                    <span class="summary-value highlight" id="snapshotDetailValue">$0</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Portfolio</span>
+                    <span class="summary-value" id="snapshotDetailPortfolio">-</span>
+                </div>
+            </div>
+            <h4 style="margin-bottom: 12px;">Holdings</h4>
+            <div class="snapshot-holdings-list" id="snapshotHoldingsList"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeModal('snapshotDetailModal')">Close</button>
+            <button class="btn btn-primary" onclick="addCurrentToCompare()"><i class="fas fa-code-compare"></i> Add to Compare</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allSnapshots = [];
+let portfolios = [];
+let currentSnapshotId = null;
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadPortfolios();
+    loadSnapshots();
+});
+
+async function loadPortfolios() {
+    try {
+        const res = await fetch('/api/portfolios');
+        portfolios = await res.json();
+        if (!Array.isArray(portfolios)) portfolios = [];
+        
+        const sel = document.getElementById('portfolioFilter');
+        portfolios.forEach(p => {
+            sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
+        });
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+async function loadSnapshots() {
+    try {
+        const res = await fetch('/api/snapshots');
+        allSnapshots = await res.json();
+        if (!Array.isArray(allSnapshots)) allSnapshots = [];
+        renderSnapshots(allSnapshots);
+    } catch (e) {
+        console.error(e);
+        showToast('Error loading snapshots', 'error');
+    }
+}
+
+function renderSnapshots(snaps) {
+    const tbody = document.getElementById('snapshotsTableBody');
+    document.getElementById('snapshotCount').textContent = snaps.length;
+    
+    if (!snaps.length) {
+        tbody.innerHTML = `
+            <tr><td colspan="6">
+                <div class="empty-state small">
+                    <div class="empty-state-icon"><i class="fas fa-camera"></i></div>
+                    <h3>No Snapshots</h3>
+                    <p>Take a snapshot to track portfolio history.</p>
+                    <button class="btn btn-primary" onclick="triggerAllSnapshots()"><i class="fas fa-camera"></i> Take Snapshot</button>
+                </div>
+            </td></tr>`;
+        return;
+    }
+    
+    tbody.innerHTML = snaps.map(s => {
+        const p = portfolios.find(x => x.id === s.portfolio_id);
+        const pName = p ? p.name : 'Unknown';
+        const hCount = (s.holdings_data || []).length;
+        
+        return `
+        <tr>
+            <td><i class="fas fa-calendar"></i> ${formatDate(s.snapshot_date)}</td>
+            <td><strong>${pName}</strong></td>
+            <td class="text-mono fw-600">$${formatNumber(s.total_value)}</td>
+            <td>${hCount} assets</td>
+            <td><span class="badge ${s.is_manual ? 'badge-primary' : 'badge-secondary'}">${s.is_manual ? 'Manual' : 'Auto'}</span></td>
+            <td>
+                <div class="action-buttons">
+                    <button class="btn btn-sm btn-ghost" onclick="viewSnapshot(${s.id})" title="View"><i class="fas fa-eye"></i></button>
+                    <button class="btn btn-sm btn-ghost" onclick="addToCompare(${s.id})" title="Compare"><i class="fas fa-code-compare"></i></button>
+                    <button class="btn btn-sm btn-ghost btn-danger-hover" onclick="deleteSnapshot(${s.id})" title="Delete"><i class="fas fa-trash"></i></button>
+                </div>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function applyFilters() {
+    const pId = document.getElementById('portfolioFilter').value;
+    const from = document.getElementById('dateFrom').value;
+    const to = document.getElementById('dateTo').value;
+    
+    let filtered = [...allSnapshots];
+    if (pId) filtered = filtered.filter(s => s.portfolio_id === parseInt(pId));
+    if (from) filtered = filtered.filter(s => s.snapshot_date >= from);
+    if (to) filtered = filtered.filter(s => s.snapshot_date <= to);
+    
+    renderSnapshots(filtered);
+}
+
+function clearFilters() {
+    document.getElementById('portfolioFilter').value = '';
+    document.getElementById('dateFrom').value = '';
+    document.getElementById('dateTo').value = '';
+    renderSnapshots(allSnapshots);
+}
+
+function viewSnapshot(id) {
+    const s = allSnapshots.find(x => x.id === id);
+    if (!s) return;
+    
+    currentSnapshotId = id;
+    const p = portfolios.find(x => x.id === s.portfolio_id);
+    
+    document.getElementById('snapshotDetailDate').textContent = formatDate(s.snapshot_date);
+    document.getElementById('snapshotDetailValue').textContent = '$' + formatNumber(s.total_value);
+    document.getElementById('snapshotDetailPortfolio').textContent = p ? p.name : 'Unknown';
+    
+    const list = document.getElementById('snapshotHoldingsList');
+    const holdings = s.holdings_data || [];
+    
+    if (!holdings.length) {
+        list.innerHTML = '<p class="text-muted">No holdings in this snapshot.</p>';
+    } else {
+        list.innerHTML = holdings.map(h => `
+            <div class="snapshot-holding-item">
+                <div class="holding-info">
+                    <img src="${h.image_url || 'https://via.placeholder.com/32'}" class="holding-icon" onerror="this.src='https://via.placeholder.com/32'">
+                    <div>
+                        <span class="holding-name">${h.name || ''}</span>
+                        <span class="holding-symbol">${(h.symbol || '').toUpperCase()}</span>
+                    </div>
+                </div>
+                <div class="holding-details">
+                    <span class="holding-amount">${formatNumber(h.amount || 0, 6)} ${(h.symbol || '').toUpperCase()}</span>
+                    <span class="holding-value">$${formatNumber(h.current_value || 0)}</span>
+                </div>
+            </div>
+        `).join('');
+    }
+    
+    openModal('snapshotDetailModal');
+}
+
+function addCurrentToCompare() {
+    if (currentSnapshotId) {
+        addToCompare(currentSnapshotId);
+        closeModal('snapshotDetailModal');
+    }
+}
+
+async function triggerAllSnapshots() {
+    try {
+        showToast('Creating snapshots...', 'info');
+        const res = await fetch('/api/trigger-all-snapshots', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            showToast('Snapshots created', 'success');
+            loadSnapshots();
+        } else {
+            showToast(data.error || 'Error', 'error');
+        }
+    } catch (e) {
+        showToast('Error', 'error');
+    }
+}
+
+function addToCompare(id) {
+    let list = JSON.parse(localStorage.getItem('compareSnapshots') || '[]');
+    if (!list.includes(id)) {
+        list.push(id);
+        localStorage.setItem('compareSnapshots', JSON.stringify(list));
+        showToast(`Added to compare (${list.length})`, 'success');
+    } else {
+        showToast('Already in compare list', 'info');
+    }
+}
+
+async function deleteSnapshot(id) {
+    if (!confirm('Delete this snapshot?')) return;
+    
+    try {
+        const res = await fetch(`/api/snapshots/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) {
+            showToast('Snapshot deleted', 'success');
+            loadSnapshots();
+        } else {
+            showToast(data.error || 'Error', 'error');
+        }
+    } catch (e) {
+        showToast('Error deleting', 'error');
+    }
+}
+</script>
+{% endblock %}

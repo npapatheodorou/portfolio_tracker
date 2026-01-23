@@ -1,0 +1,485 @@
+{% extends "base.html" %}
+
+{% block title %}Portfolio - Portfolio Tracker{% endblock %}
+
+{% block content %}
+<div class="portfolio-detail">
+    <nav class="breadcrumb">
+        <a href="/"><i class="fas fa-home"></i> Dashboard</a>
+        <i class="fas fa-chevron-right"></i>
+        <span id="breadcrumbName">Loading...</span>
+    </nav>
+
+    <div class="page-header">
+        <div>
+            <h1 id="portfolioName">Loading...</h1>
+            <p class="page-subtitle" id="portfolioDescription"></p>
+        </div>
+        <button class="btn btn-ghost" onclick="location.href='/api/export/portfolio/{{ portfolio_id }}'">
+            <i class="fas fa-download"></i> Export CSV
+        </button>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-card-icon blue"><i class="fas fa-wallet"></i></div>
+            <div class="stat-card-content">
+                <span class="stat-card-label">Total Value</span>
+                <span class="stat-card-value" id="totalValue">$0.00</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-icon green"><i class="fas fa-chart-line"></i></div>
+            <div class="stat-card-content">
+                <span class="stat-card-label">Profit/Loss</span>
+                <span class="stat-card-value" id="totalPL">$0.00</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-icon purple"><i class="fas fa-percentage"></i></div>
+            <div class="stat-card-content">
+                <span class="stat-card-label">P/L %</span>
+                <span class="stat-card-value" id="totalPLPercent">0.00%</span>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-icon orange"><i class="fas fa-coins"></i></div>
+            <div class="stat-card-content">
+                <span class="stat-card-label">Assets</span>
+                <span class="stat-card-value" id="assetCount">0</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts-grid">
+        <div class="chart-card">
+            <div class="chart-header">
+                <h3><i class="fas fa-chart-pie"></i> Asset Allocation</h3>
+            </div>
+            <div class="chart-body">
+                <canvas id="portfolioAllocationChart"></canvas>
+            </div>
+        </div>
+        <div class="chart-card">
+            <div class="chart-header">
+                <h3><i class="fas fa-chart-bar"></i> 24h Performance</h3>
+            </div>
+            <div class="chart-body">
+                <canvas id="performanceChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Holdings Table -->
+    <section class="section">
+        <div class="card">
+            <div class="card-header">
+                <h3><i class="fas fa-list"></i> Holdings</h3>
+                <div class="card-header-actions">
+                    <div class="search-box">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="holdingsSearch" placeholder="Search...">
+                    </div>
+                    <button class="btn btn-primary" onclick="openAddHoldingModal()">
+                        <i class="fas fa-plus"></i> Add Holding
+                    </button>
+                </div>
+            </div>
+            <div class="card-body no-padding">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Asset</th>
+                                <th>Amount</th>
+                                <th>Price</th>
+                                <th>Value</th>
+                                <th>Allocation</th>
+                                <th>Avg Buy</th>
+                                <th>P/L</th>
+                                <th>24h</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="holdingsTableBody">
+                            <tr><td colspan="9"><div class="loading-state"><div class="spinner"></div></div></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const portfolioId = {{ portfolio_id }};
+let currentPortfolio = null;
+let allocationChart = null;
+let perfChart = null;
+let chartsReady = false;
+
+document.addEventListener('DOMContentLoaded', function() {
+    initCharts();
+    loadPortfolioData();
+});
+
+async function loadPortfolioData() {
+    try {
+        const res = await fetch(`/api/portfolios/${portfolioId}`);
+        currentPortfolio = await res.json();
+        
+        if (currentPortfolio.error) {
+            showToast(currentPortfolio.error, 'error');
+            return;
+        }
+        
+        document.getElementById('portfolioName').textContent = currentPortfolio.name;
+        document.getElementById('breadcrumbName').textContent = currentPortfolio.name;
+        document.getElementById('portfolioDescription').textContent = currentPortfolio.description || '';
+        
+        const h = currentPortfolio.holdings || [];
+        const tv = h.reduce((s, x) => s + (x.current_value || 0), 0);
+        const pl = h.reduce((s, x) => s + (x.profit_loss || 0), 0);
+        const cost = h.reduce((s, x) => s + ((x.average_buy_price || 0) * (x.amount || 0)), 0);
+        const plPct = cost > 0 ? (pl / cost * 100) : 0;
+        
+        document.getElementById('totalValue').textContent = '$' + formatNumber(tv);
+        document.getElementById('assetCount').textContent = h.length;
+        
+        const plEl = document.getElementById('totalPL');
+        plEl.textContent = (pl >= 0 ? '+' : '-') + '$' + formatNumber(Math.abs(pl));
+        plEl.className = `stat-card-value ${pl >= 0 ? 'positive' : 'negative'}`;
+        
+        const plPctEl = document.getElementById('totalPLPercent');
+        plPctEl.textContent = (plPct >= 0 ? '+' : '') + plPct.toFixed(2) + '%';
+        plPctEl.className = `stat-card-value ${plPct >= 0 ? 'positive' : 'negative'}`;
+        
+        // Store total value for allocation calculations
+        currentPortfolio.totalValue = tv;
+        
+        renderHoldings(h, tv);
+        updateCharts(h, tv);
+    } catch (e) {
+        console.error('Error:', e);
+        showToast('Error loading portfolio', 'error');
+    }
+}
+
+function renderHoldings(holdings, totalValue) {
+    const tbody = document.getElementById('holdingsTableBody');
+    
+    if (!holdings.length) {
+        tbody.innerHTML = `
+            <tr><td colspan="9">
+                <div class="empty-state small">
+                    <div class="empty-state-icon"><i class="fas fa-coins"></i></div>
+                    <h3>No Holdings</h3>
+                    <p>Add your first crypto holding.</p>
+                    <button class="btn btn-primary" onclick="openAddHoldingModal()">
+                        <i class="fas fa-plus"></i> Add Holding
+                    </button>
+                </div>
+            </td></tr>`;
+        return;
+    }
+    
+    tbody.innerHTML = holdings.map(h => {
+        const pl = h.profit_loss || 0;
+        const plPct = h.profit_loss_percentage || 0;
+        const ch = h.price_change_percentage_24h || 0;
+        const value = h.current_value || 0;
+        const allocation = totalValue > 0 ? (value / totalValue * 100) : 0;
+        
+        return `
+        <tr class="clickable-row" onclick="editHolding(${h.id})">
+            <td>
+                <div class="asset-info">
+                    <img src="${h.image_url || 'https://via.placeholder.com/40'}" class="asset-icon" onerror="this.src='https://via.placeholder.com/40'">
+                    <div>
+                        <span class="asset-name">${h.name}</span>
+                        <span class="asset-symbol">${(h.symbol || '').toUpperCase()}</span>
+                    </div>
+                </div>
+            </td>
+            <td class="text-mono">${formatNumber(h.amount, 6)}</td>
+            <td class="text-mono">$${h.current_price ? formatNumber(h.current_price, 4) : 'N/A'}</td>
+            <td class="text-mono fw-600">$${formatNumber(value)}</td>
+            <td>
+                <div class="allocation-cell">
+                    <div class="allocation-bar-container">
+                        <div class="allocation-bar" style="width: ${Math.min(allocation, 100)}%"></div>
+                    </div>
+                    <span class="allocation-pct">${allocation.toFixed(1)}%</span>
+                </div>
+            </td>
+            <td class="text-mono">${h.average_buy_price ? '$' + formatNumber(h.average_buy_price, 4) : '—'}</td>
+            <td class="${pl >= 0 ? 'positive' : 'negative'}">
+                ${pl >= 0 ? '+' : '-'}$${formatNumber(Math.abs(pl))}<br>
+                <small>${plPct >= 0 ? '+' : ''}${plPct.toFixed(2)}%</small>
+            </td>
+            <td>
+                <span class="change-badge ${ch >= 0 ? 'positive' : 'negative'}">
+                    <i class="fas fa-caret-${ch >= 0 ? 'up' : 'down'}"></i> ${Math.abs(ch).toFixed(2)}%
+                </span>
+            </td>
+            <td><button class="btn btn-icon btn-ghost" onclick="event.stopPropagation(); editHolding(${h.id})"><i class="fas fa-ellipsis-v"></i></button></td>
+        </tr>`;
+    }).join('');
+}
+
+function initCharts() {
+    const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#f1f5f9';
+    const gridColor = '#334155';
+    
+    // Allocation Pie Chart - with built-in legend showing percentages
+    const allocationCtx = document.getElementById('portfolioAllocationChart');
+    if (allocationCtx) {
+        allocationChart = new Chart(allocationCtx, {
+            type: 'doughnut',
+            data: { 
+                labels: [], 
+                datasets: [{ 
+                    data: [], 
+                    backgroundColor: [], 
+                    borderWidth: 0,
+                    hoverOffset: 8
+                }] 
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '65%',
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'right',
+                        labels: {
+                            color: textColor,
+                            padding: 15,
+                            font: {
+                                size: 12,
+                                family: 'Inter, sans-serif'
+                            },
+                            usePointStyle: true,
+                            pointStyle: 'circle',
+                            generateLabels: function(chart) {
+                                const data = chart.data;
+                                if (data.labels.length && data.datasets.length) {
+                                    const dataset = data.datasets[0];
+                                    const total = dataset.data.reduce((a, b) => a + b, 0);
+                                    const legendColor = getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#f1f5f9';
+                                    
+                                    return data.labels.map((label, i) => {
+                                        const value = dataset.data[i];
+                                        const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                        
+                                        return {
+                                            text: `${label} (${percentage}%)`,
+                                            fillStyle: dataset.backgroundColor[i],
+                                            fontColor: legendColor,
+                                            hidden: false,
+                                            index: i
+                                        };
+                                    });
+                                }
+                                return [];
+                            }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#fff',
+                        bodyColor: '#cbd5e1',
+                        padding: 12,
+                        borderColor: '#334155',
+                        borderWidth: 1,
+                        displayColors: true,
+                        callbacks: {
+                            label: function(ctx) {
+                                const value = ctx.raw;
+                                const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+                                const pct = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                return `$${formatNumber(value)} (${pct}%)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    // Performance Chart
+    const perfCtx = document.getElementById('performanceChart');
+    if (perfCtx) {
+        perfChart = new Chart(perfCtx, {
+            type: 'bar',
+            data: { 
+                labels: [], 
+                datasets: [{ 
+                    data: [], 
+                    backgroundColor: [], 
+                    borderRadius: 6 
+                }] 
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { 
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: '#fff',
+                        bodyColor: '#cbd5e1',
+                        padding: 12,
+                        callbacks: {
+                            label: function(ctx) {
+                                return ctx.raw.toFixed(2) + '%';
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { 
+                        grid: { display: false }, 
+                        ticks: { 
+                            color: textColor,
+                            font: {
+                                family: 'Inter, sans-serif'
+                            }
+                        } 
+                    },
+                    y: { 
+                        grid: { 
+                            color: gridColor,
+                            drawBorder: false 
+                        }, 
+                        ticks: { 
+                            color: textColor,
+                            font: {
+                                family: 'Inter, sans-serif'
+                            },
+                            callback: function(v) { return v + '%'; } 
+                        } 
+                    }
+                }
+            }
+        });
+    }
+    
+    chartsReady = true;
+}
+
+function updateCharts(holdings, totalValue) {
+    if (!chartsReady) return;
+    
+    // Allocation Chart
+    if (allocationChart) {
+        if (!holdings.length || totalValue <= 0) {
+            allocationChart.data.labels = ['No Data'];
+            allocationChart.data.datasets[0].data = [1];
+            allocationChart.data.datasets[0].backgroundColor = ['#374151'];
+            allocationChart.update();
+        } else {
+            const sorted = [...holdings]
+                .filter(h => (h.current_value || 0) > 0)
+                .sort((a, b) => (b.current_value || 0) - (a.current_value || 0));
+            
+            const labels = sorted.map(h => (h.symbol || '').toUpperCase());
+            const values = sorted.map(h => h.current_value || 0);
+            const colors = generateColors(labels.length);
+            
+            allocationChart.data.labels = labels;
+            allocationChart.data.datasets[0].data = values;
+            allocationChart.data.datasets[0].backgroundColor = colors;
+            allocationChart.update();
+        }
+    }
+    
+    // Performance Chart
+    if (perfChart) {
+        if (!holdings.length) {
+            perfChart.data.labels = [];
+            perfChart.data.datasets[0].data = [];
+            perfChart.update();
+        } else {
+            const sorted = [...holdings].sort((a, b) => (b.current_value || 0) - (a.current_value || 0));
+            const labels = sorted.map(h => (h.symbol || '').toUpperCase());
+            const perf = sorted.map(h => h.price_change_percentage_24h || 0);
+            const perfColors = perf.map(v => v >= 0 ? '#10b981' : '#ef4444');
+            
+            perfChart.data.labels = labels;
+            perfChart.data.datasets[0].data = perf;
+            perfChart.data.datasets[0].backgroundColor = perfColors;
+            perfChart.update();
+        }
+    }
+}
+
+function openAddHoldingModal() {
+    window.currentPortfolioId = portfolioId;
+    openModal('addHoldingModal');
+}
+
+function editHolding(id) {
+    const h = currentPortfolio.holdings.find(x => x.id === id);
+    if (!h) return;
+    
+    document.getElementById('editHoldingId').value = id;
+    document.getElementById('editHoldingAmount').value = h.amount;
+    document.getElementById('editAverageBuyPrice').value = h.average_buy_price || '';
+    openModal('editHoldingModal');
+}
+
+async function submitEditHolding() {
+    const id = document.getElementById('editHoldingId').value;
+    const amount = parseFloat(document.getElementById('editHoldingAmount').value);
+    const avg = parseFloat(document.getElementById('editAverageBuyPrice').value) || null;
+    
+    if (isNaN(amount) || amount <= 0) {
+        showToast('Enter valid amount', 'error');
+        return;
+    }
+    
+    try {
+        const res = await fetch(`/api/holdings/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount: amount, average_buy_price: avg })
+        });
+        if (res.ok) {
+            showToast('Updated', 'success');
+            closeModal('editHoldingModal');
+            loadPortfolioData();
+        }
+    } catch (e) {
+        showToast('Error', 'error');
+    }
+}
+
+async function deleteHolding() {
+    const id = document.getElementById('editHoldingId').value;
+    if (!confirm('Delete this holding?')) return;
+    
+    try {
+        await fetch(`/api/holdings/${id}`, { method: 'DELETE' });
+        showToast('Deleted', 'success');
+        closeModal('editHoldingModal');
+        loadPortfolioData();
+    } catch (e) {
+        showToast('Error', 'error');
+    }
+}
+
+document.getElementById('holdingsSearch').addEventListener('input', function() {
+    const q = this.value.toLowerCase();
+    const filtered = (currentPortfolio?.holdings || []).filter(h =>
+        (h.name || '').toLowerCase().includes(q) || (h.symbol || '').toLowerCase().includes(q)
+    );
+    renderHoldings(filtered, currentPortfolio?.totalValue || 0);
+});
+</script>
+{% endblock %}

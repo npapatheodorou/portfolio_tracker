@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Portfolio Tracker{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <div class="page-header">
+        <div>
+            <h1>Dashboard</h1>
+            <p class="page-subtitle">Track and manage your crypto portfolios</p>
+        </div>
+        <button class="btn btn-primary btn-lg" onclick="openModal('createPortfolioModal')">
+            <i class="fas fa-plus"></i> New Portfolio
+        </button>
+    </div>
+
+    <!-- Portfolios -->
+    <section class="section">
+        <div class="section-header">
+            <h2><i class="fas fa-wallet"></i> My Portfolios</h2>
+        </div>
+        <div id="portfoliosContainer" class="portfolios-grid">
+            <div class="loading-state"><div class="spinner"></div><span>Loading...</span></div>
+        </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="section">
+        <div class="charts-grid">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3><i class="fas fa-chart-line"></i> Value Over Time</h3>
+                    <select id="chartPortfolioSelect" class="form-select">
+                        <option value="all">All Portfolios</option>
+                    </select>
+                </div>
+                <div class="chart-body"><canvas id="valueChart"></canvas></div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3><i class="fas fa-chart-pie"></i> Asset Allocation</h3>
+                </div>
+                <div class="chart-body"><canvas id="allocationPieChart"></canvas></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="chart-card full-width">
+            <div class="chart-header">
+                <h3><i class="fas fa-bars"></i> Holdings Breakdown</h3>
+            </div>
+            <div class="chart-body chart-body-tall"><canvas id="allocationBarChart"></canvas></div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let portfoliosData = [];
+let valueChart = null;
+let allocationPieChart = null;
+let allocationBarChart = null;
+let chartsInitialized = false;
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize charts FIRST
+    initCharts();
+    // Then load data
+    loadDashboard();
+});
+
+async function loadDashboard() {
+    await loadPortfolios();
+    await loadSnapshots();
+}
+
+async function loadPortfolios() {
+    try {
+        const res = await fetch('/api/portfolios');
+        
+        if (!res.ok) {
+            throw new Error('Failed to fetch portfolios');
+        }
+        
+        const data = await res.json();
+        
+        if (data && data.error) {
+            throw new Error(data.error);
+        }
+        
+        portfoliosData = Array.isArray(data) ? data : [];
+        
+        renderPortfolios();
+        updateAllocationCharts();
+        
+    } catch (e) {
+        console.error('Error loading portfolios:', e);
+        document.getElementById('portfoliosContainer').innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon"><i class="fas fa-exclamation-triangle"></i></div>
+                <h3>Error Loading Portfolios</h3>
+                <p>${e.message || 'Please try again.'}</p>
+                <button class="btn btn-primary" onclick="loadPortfolios()">
+                    <i class="fas fa-sync"></i> Retry
+                </button>
+            </div>
+        `;
+    }
+}
+
+function renderPortfolios() {
+    const container = document.getElementById('portfoliosContainer');
+    const chartSelect = document.getElementById('chartPortfolioSelect');
+    
+    chartSelect.innerHTML = '<option value="all">All Portfolios</option>';
+    portfoliosData.forEach(p => {
+        chartSelect.innerHTML += `<option value="${p.id}">${p.name}</option>`;
+    });
+    
+    if (portfoliosData.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon"><i class="fas fa-wallet"></i></div>
+                <h3>No Portfolios Yet</h3>
+                <p>Create your first portfolio to start tracking.</p>
+                <button class="btn btn-primary btn-lg" onclick="openModal('createPortfolioModal')">
+                    <i class="fas fa-plus"></i> Create Portfolio
+                </button>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = portfoliosData.map(p => {
+        const tv = p.total_value || 0;
+        const h = p.holdings || [];
+        const pl = h.reduce((s, x) => s + (x.profit_loss || 0), 0);
+        const cost = h.reduce((s, x) => s + ((x.average_buy_price || 0) * (x.amount || 0)), 0);
+        const plPct = cost > 0 ? (pl / cost * 100) : 0;
+        const pos = pl >= 0;
+        
+        return `
+        <div class="portfolio-card" onclick="location.href='/portfolio/${p.id}'">
+            <div class="portfolio-card-header">
+                <div class="portfolio-icon"><i class="fas fa-briefcase"></i></div>
+                <div class="portfolio-actions" onclick="event.stopPropagation()">
+                    <button class="btn btn-icon btn-ghost" onclick="takeSnapshot(${p.id})" title="Snapshot"><i class="fas fa-camera"></i></button>
+                    <button class="btn btn-icon btn-ghost" onclick="location.href='/api/export/portfolio/${p.id}'" title="Export"><i class="fas fa-download"></i></button>
+                    <button class="btn btn-icon btn-ghost btn-danger-hover" onclick="deletePortfolio(${p.id})" title="Delete"><i class="fas fa-trash"></i></button>
+                </div>
+            </div>
+            <div class="portfolio-card-body">
+                <h3>${p.name}</h3>
+                ${p.description ? `<p class="portfolio-desc">${p.description}</p>` : ''}
+                <div class="portfolio-value-display">
+                    <span class="value-label">Total Value</span>
+                    <span class="value-amount">$${formatNumber(tv)}</span>
+                </div>
+            </div>
+            <div class="portfolio-card-footer">
+                <div class="portfolio-stat">
+                    <span class="stat-label">P/L</span>
+                    <span class="stat-value ${pos ? 'positive' : 'negative'}">
+                        ${pos ? '+' : ''}$${formatNumber(pl)} (${pos ? '+' : ''}${plPct.toFixed(2)}%)
+                    </span>
+                </div>
+                <div class="portfolio-stat">
+                    <span class="stat-label">Assets</span>
+                    <span class="stat-value">${h.length}</span>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function initCharts() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const textColor = isDark ? '#f1f5f9' : '#0f172a';
+    const gridColor = isDark ? '#334155' : '#e2e8f0';
+    
+    const valueCtx = document.getElementById('valueChart');
+    if (valueCtx) {
+        valueChart = new Chart(valueCtx, {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: true, position: 'top', labels: { color: textColor } }
+                },
+                scales: {
+                    x: { grid: { color: gridColor }, ticks: { color: textColor } },
+                    y: { 
+                        grid: { color: gridColor }, 
+                        ticks: { 
+                            color: textColor, 
+                            callback: function(v) { return '$' + formatNumber(v); } 
+                        } 
+                    }
+                }
+            }
+        });
+    }
+    
+    const pieCtx = document.getElementById('allocationPieChart');
+    if (pieCtx) {
+        allocationPieChart = new Chart(pieCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['No Data'],
+                datasets: [{ data: [1], backgroundColor: ['#374151'], borderWidth: 0 }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '60%',
+                plugins: {
+                    legend: { position: 'right', labels: { color: textColor, padding: 10 } },
+                    tooltip: {
+                        callbacks: {
+                            label: function(ctx) {
+                                if (ctx.label === 'No Data') return 'No holdings';
+                                const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+                                const pct = ((ctx.raw / total) * 100).toFixed(1);
+                                return `$${formatNumber(ctx.raw)} (${pct}%)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    const barCtx = document.getElementById('allocationBarChart');
+    if (barCtx) {
+        allocationBarChart = new Chart(barCtx, {
+            type: 'bar',
+            data: {
+                labels: [],
+                datasets: [{ data: [], backgroundColor: [], borderRadius: 6 }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { 
+                        grid: { color: gridColor }, 
+                        ticks: { 
+                            color: textColor, 
+                            callback: function(v) { return '$' + formatNumber(v); } 
+                        } 
+                    },
+                    y: { grid: { display: false }, ticks: { color: textColor } }
+                }
+            }
+        });
+    }
+    
+    chartsInitialized = true;
+}
+
+function updateAllocationCharts() {
+    if (!chartsInitialized || !allocationPieChart || !allocationBarChart) {
+        console.log('Charts not ready yet');
+        return;
+    }
+    
+    const holdings = {};
+    
+    portfoliosData.forEach(p => {
+        (p.holdings || []).forEach(h => {
+            const key = (h.symbol || '').toUpperCase();
+            if (!key) return;
+            if (!holdings[key]) holdings[key] = { value: 0, name: h.name };
+            holdings[key].value += h.current_value || 0;
+        });
+    });
+    
+    const sorted = Object.entries(holdings)
+        .filter(([, d]) => d.value > 0)
+        .sort(([, a], [, b]) => b.value - a.value)
+        .slice(0, 10);
+    
+    if (sorted.length === 0) {
+        allocationPieChart.data.labels = ['No Holdings'];
+        allocationPieChart.data.datasets[0].data = [1];
+        allocationPieChart.data.datasets[0].backgroundColor = ['#374151'];
+        allocationPieChart.update();
+        
+        allocationBarChart.data.labels = [];
+        allocationBarChart.data.datasets[0].data = [];
+        allocationBarChart.data.datasets[0].backgroundColor = [];
+        allocationBarChart.update();
+        return;
+    }
+    
+    const labels = sorted.map(([s]) => s);
+    const values = sorted.map(([, d]) => d.value);
+    const colors = generateColors(labels.length);
+    
+    allocationPieChart.data.labels = labels;
+    allocationPieChart.data.datasets[0].data = values;
+    allocationPieChart.data.datasets[0].backgroundColor = colors;
+    allocationPieChart.update();
+    
+    allocationBarChart.data.labels = labels;
+    allocationBarChart.data.datasets[0].data = values;
+    allocationBarChart.data.datasets[0].backgroundColor = colors;
+    allocationBarChart.update();
+}
+
+async function loadSnapshots(portfolioId) {
+    if (!valueChart) return;
+    
+    try {
+        let url = '/api/snapshots';
+        if (portfolioId && portfolioId !== 'all') {
+            url += `?portfolio_id=${portfolioId}`;
+        }
+        
+        const res = await fetch(url);
+        const snaps = await res.json();
+        
+        if (!Array.isArray(snaps) || snaps.length === 0) {
+            valueChart.data.labels = ['No snapshots'];
+            valueChart.data.datasets = [{ 
+                label: 'Value', 
+                data: [0], 
+                borderColor: '#6366f1',
+                backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                fill: true
+            }];
+            valueChart.update();
+            return;
+        }
+        
+        const byPortfolio = {};
+        const dates = new Set();
+        
+        snaps.forEach(s => {
+            dates.add(s.snapshot_date);
+            const pName = portfoliosData.find(p => p.id === s.portfolio_id)?.name || `Portfolio ${s.portfolio_id}`;
+            if (!byPortfolio[pName]) byPortfolio[pName] = {};
+            byPortfolio[pName][s.snapshot_date] = s.total_value;
+        });
+        
+        const sortedDates = Array.from(dates).sort();
+        const colors = generateColors(Object.keys(byPortfolio).length);
+        
+        valueChart.data.labels = sortedDates.map(d => formatDate(d));
+        valueChart.data.datasets = Object.entries(byPortfolio).map(([name, data], i) => ({
+            label: name,
+            data: sortedDates.map(d => data[d] || 0),
+            borderColor: colors[i],
+            backgroundColor: colors[i] + '20',
+            fill: true,
+            tension: 0.4
+        }));
+        valueChart.update();
+    } catch (e) {
+        console.error('Error loading snapshots:', e);
+    }
+}
+
+document.getElementById('chartPortfolioSelect').addEventListener('change', function(e) {
+    loadSnapshots(e.target.value);
+});
+
+async function deletePortfolio(id) {
+    if (!confirm('Delete this portfolio?')) return;
+    try {
+        await fetch(`/api/portfolios/${id}`, { method: 'DELETE' });
+        showToast('Portfolio deleted', 'success');
+        loadPortfolios();
+    } catch (e) {
+        showToast('Error deleting', 'error');
+    }
+}
+
+async function takeSnapshot(id) {
+    try {
+        showToast('Creating snapshot...', 'info');
+        const res = await fetch(`/api/portfolios/${id}/snapshot`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            showToast('Snapshot created', 'success');
+            loadSnapshots();
+        } else {
+            showToast(data.error || 'Error', 'error');
+        }
+    } catch (e) {
+        showToast('Error', 'error');
+    }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+
+{% block title %}Compare - Portfolio Tracker{% endblock %}
+
+{% block content %}
+<div class="compare-page">
+    <div class="page-header">
+        <div>
+            <h1>Compare Snapshots</h1>
+            <p class="page-subtitle">Compare portfolio performance over time</p>
+        </div>
+        <div>
+            <button class="btn btn-ghost" onclick="clearCompare()"><i class="fas fa-trash"></i> Clear</button>
+            <button class="btn btn-primary" onclick="exportCompare()"><i class="fas fa-download"></i> Export</button>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 24px;">
+        <div class="card-header"><h3>Selected Snapshots</h3></div>
+        <div class="card-body">
+            <div id="selectedSnapshots" class="snapshots-chips">
+                <p class="text-muted">No snapshots selected. Go to Snapshots page to add.</p>
+            </div>
+            <button class="btn btn-primary btn-lg" style="margin-top: 16px;" onclick="runCompare()" id="compareBtn" disabled>
+                <i class="fas fa-chart-line"></i> Compare
+            </button>
+        </div>
+    </div>
+
+    <div id="comparisonResults" style="display: none;">
+        <div class="card" style="margin-bottom: 24px;">
+            <div class="card-header"><h3>Value Changes</h3></div>
+            <div class="card-body">
+                <div id="valueChanges" class="changes-grid"></div>
+            </div>
+        </div>
+        
+        <div class="chart-card">
+            <div class="chart-header"><h3>Value Over Time</h3></div>
+            <div class="chart-body"><canvas id="comparisonChart"></canvas></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let selectedSnapshots = [];
+let compChart = null;
+
+document.addEventListener('DOMContentLoaded', loadSelected);
+
+async function loadSelected() {
+    const ids = JSON.parse(localStorage.getItem('compareSnapshots') || '[]');
+    if (!ids.length) {
+        document.getElementById('compareBtn').disabled = true;
+        return;
+    }
+    
+    try {
+        const res = await fetch('/api/snapshots');
+        const all = await res.json();
+        selectedSnapshots = all.filter(s => ids.includes(s.id));
+        renderSelected();
+        document.getElementById('compareBtn').disabled = selectedSnapshots.length < 2;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+function renderSelected() {
+    const container = document.getElementById('selectedSnapshots');
+    
+    if (!selectedSnapshots.length) {
+        container.innerHTML = '<p class="text-muted">No snapshots selected.</p>';
+        return;
+    }
+    
+    container.innerHTML = selectedSnapshots.map(s => `
+        <div class="snapshot-chip">
+            <span>${formatDate(s.snapshot_date)}</span>
+            <span class="chip-value">$${formatNumber(s.total_value)}</span>
+            <button class="btn btn-icon btn-sm" onclick="removeFromCompare(${s.id})"><i class="fas fa-times"></i></button>
+        </div>
+    `).join('');
+}
+
+function removeFromCompare(id) {
+    let list = JSON.parse(localStorage.getItem('compareSnapshots') || '[]');
+    list = list.filter(x => x !== id);
+    localStorage.setItem('compareSnapshots', JSON.stringify(list));
+    loadSelected();
+}
+
+function clearCompare() {
+    localStorage.removeItem('compareSnapshots');
+    loadSelected();
+    document.getElementById('comparisonResults').style.display = 'none';
+}
+
+async function runCompare() {
+    const ids = selectedSnapshots.map(s => s.id);
+    if (ids.length < 2) {
+        showToast('Select at least 2 snapshots', 'error');
+        return;
+    }
+    
+    try {
+        const res = await fetch('/api/compare-snapshots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ snapshot_ids: ids })
+        });
+        const data = await res.json();
+        
+        if (data.error) {
+            showToast(data.error, 'error');
+            return;
+        }
+        
+        renderResults(data);
+        document.getElementById('comparisonResults').style.display = 'block';
+    } catch (e) {
+        showToast('Error comparing', 'error');
+    }
+}
+
+function renderResults(data) {
+    const changesDiv = document.getElementById('valueChanges');
+    changesDiv.innerHTML = data.value_changes.map(c => {
+        const pos = c.value_change >= 0;
+        return `
+            <div class="change-card ${pos ? 'positive' : 'negative'}">
+                <div class="change-dates">${formatDate(c.from_date)} → ${formatDate(c.to_date)}</div>
+                <div class="change-value">${pos ? '+' : '-'}$${formatNumber(Math.abs(c.value_change))}</div>
+                <div class="change-pct">${pos ? '+' : ''}${c.percentage_change.toFixed(2)}%</div>
+            </div>
+        `;
+    }).join('');
+    
+    const snaps = data.snapshots;
+    const labels = snaps.map(s => formatDate(s.snapshot_date));
+    const values = snaps.map(s => s.total_value);
+    
+    if (compChart) compChart.destroy();
+    
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const textColor = isDark ? '#f1f5f9' : '#0f172a';
+    const gridColor = isDark ? '#334155' : '#e2e8f0';
+    
+    compChart = new Chart(document.getElementById('comparisonChart'), {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                label: 'Value',
+                data: values,
+                borderColor: '#6366f1',
+                backgroundColor: 'rgba(99,102,241,0.1)',
+                fill: true,
+                tension: 0.4,
+                pointRadius: 6
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    labels: { color: textColor }
+                }
+            },
+            scales: {
+                x: {
+                    ticks: { color: textColor },
+                    grid: { color: gridColor }
+                },
+                y: { 
+                    ticks: { 
+                        color: textColor,
+                        callback: function(v) { return '$' + formatNumber(v); }
+                    },
+                    grid: { color: gridColor }
+                }
+            }
+        }
+    });
+}
+
+function exportCompare() {
+    showToast('Export not implemented yet', 'info');
+}
+</script>
+{% endblock %}
