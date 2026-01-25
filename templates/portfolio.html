@@ -92,6 +92,7 @@
                     <table class="data-table">
                         <thead>
                             <tr>
+                                <th>Order</th>
                                 <th>Asset</th>
                                 <th>Amount</th>
                                 <th>Price</th>
@@ -100,11 +101,11 @@
                                 <th>Avg Buy</th>
                                 <th>P/L</th>
                                 <th>24h</th>
-                                <th></th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="holdingsTableBody">
-                            <tr><td colspan="9"><div class="loading-state"><div class="spinner"></div></div></td></tr>
+                            <tr><td colspan="10"><div class="loading-state"><div class="spinner"></div></div></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -158,7 +159,6 @@ async function loadPortfolioData() {
         plPctEl.textContent = (plPct >= 0 ? '+' : '') + plPct.toFixed(2) + '%';
         plPctEl.className = `stat-card-value ${plPct >= 0 ? 'positive' : 'negative'}`;
         
-        // Store total value for allocation calculations
         currentPortfolio.totalValue = tv;
         
         renderHoldings(h, tv);
@@ -174,7 +174,7 @@ function renderHoldings(holdings, totalValue) {
     
     if (!holdings.length) {
         tbody.innerHTML = `
-            <tr><td colspan="9">
+            <tr><td colspan="10">
                 <div class="empty-state small">
                     <div class="empty-state-icon"><i class="fas fa-coins"></i></div>
                     <h3>No Holdings</h3>
@@ -187,15 +187,20 @@ function renderHoldings(holdings, totalValue) {
         return;
     }
     
-    tbody.innerHTML = holdings.map(h => {
+    tbody.innerHTML = holdings.map((h, index) => {
         const pl = h.profit_loss || 0;
         const plPct = h.profit_loss_percentage || 0;
         const ch = h.price_change_percentage_24h || 0;
         const value = h.current_value || 0;
         const allocation = totalValue > 0 ? (value / totalValue * 100) : 0;
+        const isFirst = index === 0;
+        const isLast = index === holdings.length - 1;
         
         return `
         <tr class="clickable-row" onclick="editHolding(${h.id})">
+            <td>
+                <span class="order-number">${index + 1}</span>
+            </td>
             <td>
                 <div class="asset-info">
                     <img src="${h.image_url || 'https://via.placeholder.com/40'}" class="asset-icon" onerror="this.src='https://via.placeholder.com/40'">
@@ -226,16 +231,34 @@ function renderHoldings(holdings, totalValue) {
                     <i class="fas fa-caret-${ch >= 0 ? 'up' : 'down'}"></i> ${Math.abs(ch).toFixed(2)}%
                 </span>
             </td>
-            <td><button class="btn btn-icon btn-ghost" onclick="event.stopPropagation(); editHolding(${h.id})"><i class="fas fa-ellipsis-v"></i></button></td>
+            <td>
+                <div class="row-actions" onclick="event.stopPropagation()">
+                    <button class="btn btn-icon btn-ghost ${isFirst ? 'btn-disabled' : ''}" 
+                            onclick="moveHolding(${h.id}, 'up')" 
+                            title="Move up"
+                            ${isFirst ? 'disabled' : ''}>
+                        <i class="fas fa-arrow-up"></i>
+                    </button>
+                    <button class="btn btn-icon btn-ghost ${isLast ? 'btn-disabled' : ''}" 
+                            onclick="moveHolding(${h.id}, 'down')" 
+                            title="Move down"
+                            ${isLast ? 'disabled' : ''}>
+                        <i class="fas fa-arrow-down"></i>
+                    </button>
+                    <button class="btn btn-icon btn-ghost" onclick="editHolding(${h.id})" title="Edit">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                </div>
+            </td>
         </tr>`;
     }).join('');
 }
 
 function initCharts() {
-    const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#f1f5f9';
-    const gridColor = '#334155';
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const textColor = isDark ? '#f1f5f9' : '#0f172a';
+    const gridColor = isDark ? '#334155' : '#e2e8f0';
     
-    // Allocation Pie Chart - with built-in legend showing percentages
     const allocationCtx = document.getElementById('portfolioAllocationChart');
     if (allocationCtx) {
         allocationChart = new Chart(allocationCtx, {
@@ -271,7 +294,8 @@ function initCharts() {
                                 if (data.labels.length && data.datasets.length) {
                                     const dataset = data.datasets[0];
                                     const total = dataset.data.reduce((a, b) => a + b, 0);
-                                    const legendColor = getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim() || '#f1f5f9';
+                                    const currentTheme = document.documentElement.getAttribute('data-theme');
+                                    const labelColor = currentTheme === 'dark' ? '#f1f5f9' : '#0f172a';
                                     
                                     return data.labels.map((label, i) => {
                                         const value = dataset.data[i];
@@ -280,7 +304,7 @@ function initCharts() {
                                         return {
                                             text: `${label} (${percentage}%)`,
                                             fillStyle: dataset.backgroundColor[i],
-                                            fontColor: legendColor,
+                                            fontColor: labelColor,
                                             hidden: false,
                                             index: i
                                         };
@@ -312,7 +336,6 @@ function initCharts() {
         });
     }
     
-    // Performance Chart
     const perfCtx = document.getElementById('performanceChart');
     if (perfCtx) {
         perfChart = new Chart(perfCtx, {
@@ -347,9 +370,7 @@ function initCharts() {
                         grid: { display: false }, 
                         ticks: { 
                             color: textColor,
-                            font: {
-                                family: 'Inter, sans-serif'
-                            }
+                            font: { family: 'Inter, sans-serif' }
                         } 
                     },
                     y: { 
@@ -359,9 +380,7 @@ function initCharts() {
                         }, 
                         ticks: { 
                             color: textColor,
-                            font: {
-                                family: 'Inter, sans-serif'
-                            },
+                            font: { family: 'Inter, sans-serif' },
                             callback: function(v) { return v + '%'; } 
                         } 
                     }
@@ -376,20 +395,20 @@ function initCharts() {
 function updateCharts(holdings, totalValue) {
     if (!chartsReady) return;
     
+    // Use holdings in the order provided (already sorted by display_order from backend)
+    const ordered = holdings.slice();
+    
     // Allocation Chart
     if (allocationChart) {
-        if (!holdings.length || totalValue <= 0) {
+        if (!ordered.length || totalValue <= 0) {
             allocationChart.data.labels = ['No Data'];
             allocationChart.data.datasets[0].data = [1];
             allocationChart.data.datasets[0].backgroundColor = ['#374151'];
             allocationChart.update();
         } else {
-            const sorted = [...holdings]
-                .filter(h => (h.current_value || 0) > 0)
-                .sort((a, b) => (b.current_value || 0) - (a.current_value || 0));
-            
-            const labels = sorted.map(h => (h.symbol || '').toUpperCase());
-            const values = sorted.map(h => h.current_value || 0);
+            const nonZero = ordered.filter(h => (h.current_value || 0) > 0);
+            const labels = nonZero.map(h => (h.symbol || '').toUpperCase());
+            const values = nonZero.map(h => h.current_value || 0);
             const colors = generateColors(labels.length);
             
             allocationChart.data.labels = labels;
@@ -401,14 +420,13 @@ function updateCharts(holdings, totalValue) {
     
     // Performance Chart
     if (perfChart) {
-        if (!holdings.length) {
+        if (!ordered.length) {
             perfChart.data.labels = [];
             perfChart.data.datasets[0].data = [];
             perfChart.update();
         } else {
-            const sorted = [...holdings].sort((a, b) => (b.current_value || 0) - (a.current_value || 0));
-            const labels = sorted.map(h => (h.symbol || '').toUpperCase());
-            const perf = sorted.map(h => h.price_change_percentage_24h || 0);
+            const labels = ordered.map(h => (h.symbol || '').toUpperCase());
+            const perf = ordered.map(h => h.price_change_percentage_24h || 0);
             const perfColors = perf.map(v => v >= 0 ? '#10b981' : '#ef4444');
             
             perfChart.data.labels = labels;
@@ -416,6 +434,26 @@ function updateCharts(holdings, totalValue) {
             perfChart.data.datasets[0].backgroundColor = perfColors;
             perfChart.update();
         }
+    }
+}
+
+async function moveHolding(id, direction) {
+    try {
+        const res = await fetch(`/api/holdings/${id}/reorder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ direction })
+        });
+        const data = await res.json();
+        
+        if (res.ok && data.success) {
+            await loadPortfolioData();
+        } else {
+            showToast(data.error || 'Error reordering', 'error');
+        }
+    } catch (e) {
+        console.error('Error reordering:', e);
+        showToast('Error reordering', 'error');
     }
 }
 

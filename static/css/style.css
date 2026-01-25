@@ -1779,3 +1779,113 @@ textarea.form-control {
         min-height: 250px;
     }
 }
+
+/* ============== ROW ACTIONS & REORDER ============== */
+
+.row-actions {
+    display: flex;
+    gap: 4px;
+    justify-content: flex-end;
+    align-items: center;
+}
+
+.order-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: var(--bg-input);
+    border-radius: var(--radius-sm);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.btn-disabled {
+    opacity: 0.3 !important;
+    cursor: not-allowed !important;
+}
+
+.btn-disabled:hover {
+    background: transparent !important;
+    color: var(--text-muted) !important;
+}
+
+/* Hover effect on reorder buttons */
+.row-actions .btn-icon:not(.btn-disabled):hover {
+    background: var(--primary-light);
+    color: var(--primary);
+}
+
+/* Make the arrow icons smaller */
+.row-actions .btn-icon {
+    padding: 6px;
+    width: 32px;
+    height: 32px;
+}
+
+.row-actions .btn-icon i {
+    font-size: 0.8rem;
+}
+
+/* ============== ALLOCATION BAR ============== */
+
+.allocation-cell {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 120px;
+}
+
+.allocation-bar-container {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-input);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.allocation-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary), #8b5cf6);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.allocation-pct {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-width: 45px;
+    text-align: right;
+}
+
+/* ============== RESPONSIVE ============== */
+
+@media (max-width: 768px) {
+    .allocation-cell {
+        min-width: 80px;
+    }
+    
+    .allocation-bar-container {
+        display: none;
+    }
+    
+    .row-actions {
+        flex-direction: column;
+        gap: 2px;
+    }
+    
+    .row-actions .btn-icon {
+        width: 28px;
+        height: 28px;
+        padding: 4px;
+    }
+    
+    .order-number {
+        width: 24px;
+        height: 24px;
+        font-size: 0.75rem;
+    }
+}

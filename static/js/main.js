@@ -91,15 +91,11 @@ document.addEventListener('DOMContentLoaded', function() {
             const icon = themeBtn.querySelector('i');
             if (icon) icon.className = next === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
             
-            // Update chart colors when theme changes
             updateChartThemeColors(next);
         });
     }
     
-    // Setup coin search
     setupCoinSearch();
-    
-    // Setup global buttons
     setupGlobalButtons();
 });
 
@@ -109,7 +105,6 @@ function updateChartThemeColors(theme) {
     const textColor = theme === 'dark' ? '#f1f5f9' : '#0f172a';
     const gridColor = theme === 'dark' ? '#334155' : '#e2e8f0';
     
-    // Update dashboard charts if they exist
     if (typeof allocationPieChart !== 'undefined' && allocationPieChart) {
         if (allocationPieChart.options.plugins.legend) {
             allocationPieChart.options.plugins.legend.labels.color = textColor;
@@ -140,7 +135,6 @@ function updateChartThemeColors(theme) {
         valueChart.update();
     }
     
-    // Update portfolio page charts if they exist
     if (typeof allocationChart !== 'undefined' && allocationChart) {
         if (allocationChart.options.plugins.legend) {
             allocationChart.options.plugins.legend.labels.color = textColor;
@@ -157,7 +151,6 @@ function updateChartThemeColors(theme) {
         perfChart.update();
     }
     
-    // Update comparison chart if it exists
     if (typeof compChart !== 'undefined' && compChart) {
         if (compChart.options.plugins.legend) {
             compChart.options.plugins.legend.labels.color = textColor;
@@ -252,7 +245,6 @@ function clearSelectedCoin() {
 // ============== GLOBAL BUTTONS ==============
 
 function setupGlobalButtons() {
-    // Refresh prices
     const refreshBtn = document.getElementById('refreshPricesBtn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async function() {
@@ -268,7 +260,6 @@ function setupGlobalButtons() {
                     showToast('Rate limited. Wait and retry.', 'warning');
                 } else if (data.success) {
                     showToast('Prices refreshed', 'success');
-                    // Reload page data if functions exist
                     if (typeof loadPortfolios === 'function') loadPortfolios();
                     if (typeof loadPortfolioData === 'function') loadPortfolioData();
                 } else {
@@ -283,7 +274,6 @@ function setupGlobalButtons() {
         });
     }
     
-    // Take snapshot
     const snapBtn = document.getElementById('takeSnapshotBtn');
     if (snapBtn) {
         snapBtn.addEventListener('click', async function() {

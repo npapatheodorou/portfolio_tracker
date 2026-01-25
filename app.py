@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 from datetime import datetime, date
 import json
 import csv
@@ -52,6 +53,7 @@ class Holding(db.Model):
     image_url = db.Column(db.String(500), nullable=True, default='')
     last_updated = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    display_order = db.Column(db.Integer, nullable=False, default=0)
 
 
 class Snapshot(db.Model):
@@ -74,7 +76,13 @@ def serialize_portfolio(p):
         holdings_list = []
         total_value = 0
         
-        for h in p.holdings:
+        # Sort holdings by display_order then id
+        ordered_holdings = sorted(
+            p.holdings,
+            key=lambda h: ((h.display_order or 0), h.id)
+        )
+        
+        for h in ordered_holdings:
             hd = {
                 'id': h.id,
                 'portfolio_id': h.portfolio_id,
@@ -90,7 +98,8 @@ def serialize_portfolio(p):
                 'image_url': h.image_url or '',
                 'last_updated': h.last_updated.isoformat() if h.last_updated else None,
                 'profit_loss': 0,
-                'profit_loss_percentage': 0
+                'profit_loss_percentage': 0,
+                'display_order': h.display_order or 0
             }
             
             if hd['average_buy_price'] and hd['current_price'] and hd['amount']:
@@ -142,7 +151,7 @@ def serialize_snapshot(s):
 def get_coin_price(coin_ids):
     """Get prices from CoinGecko"""
     try:
-        time.sleep(1.5)  # Rate limiting
+        time.sleep(1.5)
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {
             "ids": ",".join(coin_ids),
@@ -152,7 +161,7 @@ def get_coin_price(coin_ids):
         response = requests.get(url, params=params, timeout=30)
         
         if response.status_code == 429:
-            return None, True  # Rate limited
+            return None, True
         
         response.raise_for_status()
         return response.json(), False
@@ -164,7 +173,7 @@ def get_coin_price(coin_ids):
 def search_coins(query):
     """Search coins on CoinGecko"""
     try:
-        time.sleep(1.5)  # Rate limiting
+        time.sleep(1.5)
         url = "https://api.coingecko.com/api/v3/search"
         response = requests.get(url, params={"query": query}, timeout=30)
         
@@ -246,10 +255,16 @@ def create_snapshot_for_portfolio(portfolio, is_manual=False):
     """Create a snapshot for a portfolio"""
     today = date.today()
     
+    # Sort holdings by display_order
+    ordered_holdings = sorted(
+        portfolio.holdings,
+        key=lambda h: ((h.display_order or 0), h.id)
+    )
+    
     holdings_data = []
     total_value = 0
     
-    for h in portfolio.holdings:
+    for h in ordered_holdings:
         hd = {
             'coin_id': h.coin_id or '',
             'symbol': h.symbol or '',
@@ -258,7 +273,8 @@ def create_snapshot_for_portfolio(portfolio, is_manual=False):
             'current_price': float(h.current_price) if h.current_price else None,
             'current_value': float(h.current_value) if h.current_value else 0,
             'average_buy_price': float(h.average_buy_price) if h.average_buy_price else None,
-            'image_url': h.image_url or ''
+            'image_url': h.image_url or '',
+            'display_order': h.display_order or 0
         }
         holdings_data.append(hd)
         total_value += hd['current_value']
@@ -411,6 +427,10 @@ def api_add_holding(portfolio_id):
                     existing.average_buy_price = (old_value + new_value) / existing.amount
             holding = existing
         else:
+            # Determine next display_order
+            max_order = db.session.query(func.max(Holding.display_order))\
+                .filter_by(portfolio_id=portfolio_id).scalar() or 0
+            
             holding = Holding(
                 portfolio_id=portfolio_id,
                 coin_id=data.get('coin_id', ''),
@@ -418,7 +438,8 @@ def api_add_holding(portfolio_id):
                 name=data.get('name', ''),
                 amount=data.get('amount') or 0,
                 average_buy_price=data.get('average_buy_price'),
-                image_url=data.get('image_url', '')
+                image_url=data.get('image_url', ''),
+                display_order=max_order + 1
             )
             db.session.add(holding)
         
@@ -445,7 +466,8 @@ def api_add_holding(portfolio_id):
             'name': holding.name,
             'amount': holding.amount,
             'current_price': holding.current_price,
-            'current_value': holding.current_value
+            'current_value': holding.current_value,
+            'display_order': holding.display_order
         }
         
         if rate_limited:
@@ -497,6 +519,43 @@ def api_delete_holding(holding_id):
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Error deleting holding: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/holdings/<int:holding_id>/reorder', methods=['POST'])
+def api_reorder_holding(holding_id):
+    """Move a holding up or down within its portfolio."""
+    try:
+        holding = Holding.query.get(holding_id)
+        if not holding:
+            return jsonify({'error': 'Holding not found'}), 404
+        
+        data = request.get_json() or {}
+        direction = data.get('direction')
+        if direction not in ('up', 'down'):
+            return jsonify({'error': 'Invalid direction. Use "up" or "down".'}), 400
+        
+        # Find neighbor to swap with
+        query = Holding.query.filter_by(portfolio_id=holding.portfolio_id)
+        
+        if direction == 'up':
+            neighbor = query.filter(Holding.display_order < holding.display_order)\
+                            .order_by(Holding.display_order.desc()).first()
+        else:
+            neighbor = query.filter(Holding.display_order > holding.display_order)\
+                            .order_by(Holding.display_order.asc()).first()
+        
+        if not neighbor:
+            return jsonify({'success': True, 'message': 'Already at edge'})
+        
+        # Swap display_order values
+        holding.display_order, neighbor.display_order = neighbor.display_order, holding.display_order
+        db.session.commit()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error reordering holding: {e}")
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
@@ -655,20 +714,27 @@ def api_export_portfolio(portfolio_id):
         if not portfolio:
             return jsonify({'error': 'Portfolio not found'}), 404
         
+        # Sort holdings by display_order
+        ordered_holdings = sorted(
+            portfolio.holdings,
+            key=lambda h: ((h.display_order or 0), h.id)
+        )
+        
         output = io.StringIO()
         writer = csv.writer(output)
         
         writer.writerow(['Portfolio:', portfolio.name])
         writer.writerow(['Export Date:', datetime.now().isoformat()])
         writer.writerow([])
-        writer.writerow(['Symbol', 'Name', 'Amount', 'Price', 'Value', 'Avg Buy', 'P/L'])
+        writer.writerow(['Order', 'Symbol', 'Name', 'Amount', 'Price', 'Value', 'Avg Buy', 'P/L'])
         
-        for h in portfolio.holdings:
+        for h in ordered_holdings:
             pl = 0
             if h.average_buy_price and h.current_price and h.amount:
                 pl = (h.current_price - h.average_buy_price) * h.amount
             
             writer.writerow([
+                h.display_order or 0,
                 h.symbol or '',
                 h.name or '',
                 h.amount or 0,
