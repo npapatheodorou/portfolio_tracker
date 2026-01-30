@@ -1,7 +1,5 @@
 
-## .gitignore
 
-```gitignore
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -252,5 +250,15 @@ lib64/
 # Project specific
 portfolio.db
 portfolio_tracker.db
+portfolio_encrypted.db
 *.csv
 exports/
+
+# Hash files and checksums
+*.hash
+*.checksum
+*.sha1
+*.sha256
+*.md5
+.hashes/
+checksums/

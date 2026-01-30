@@ -77,11 +77,14 @@
         <div class="card">
             <div class="card-header">
                 <h3><i class="fas fa-list"></i> Holdings</h3>
-                <div class="card-header-actions">
+<div class="card-header-actions">
                     <div class="search-box">
                         <i class="fas fa-search"></i>
                         <input type="text" id="holdingsSearch" placeholder="Search...">
                     </div>
+                    <select id="orderSelect" class="form-select" onchange="orderHoldings()">
+                        <option value="">Custom Order</option>
+                    </select>
                     <button class="btn btn-primary" onclick="openAddHoldingModal()">
                         <i class="fas fa-plus"></i> Add Holding
                     </button>
@@ -126,8 +129,21 @@ let chartsReady = false;
 
 document.addEventListener('DOMContentLoaded', function() {
     initCharts();
+    loadOrderTypes();
     loadPortfolioData();
 });
+
+async function loadOrderTypes() {
+    try {
+        const res = await fetch('/api/order-types');
+        const orderTypes = await res.json();
+        const select = document.getElementById('orderSelect');
+        select.innerHTML = '<option value="">Custom Order</option>' + 
+            orderTypes.map(o => `<option value="${o.type}">${o.label}</option>`).join('');
+    } catch (e) {
+        console.error('Error loading order types:', e);
+    }
+}
 
 async function loadPortfolioData() {
     try {
@@ -505,6 +521,30 @@ async function deleteHolding() {
         loadPortfolioData();
     } catch (e) {
         showToast('Error', 'error');
+    }
+}
+
+async function orderHoldings() {
+    const orderType = document.getElementById('orderSelect').value;
+    if (!orderType) return; // Custom order - no action needed
+    
+    try {
+        const res = await fetch(`/api/portfolios/${portfolioId}/holdings/order`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ order_type: orderType })
+        });
+        const data = await res.json();
+        
+        if (res.ok && data.success) {
+            showToast('Ordered successfully', 'success');
+            loadPortfolioData();
+        } else {
+            showToast(data.error || 'Error ordering holdings', 'error');
+        }
+    } catch (e) {
+        console.error('Error ordering holdings:', e);
+        showToast('Error ordering holdings', 'error');
     }
 }
 

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:instance/portfolio_encrypted.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///portfolio_encrypted.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -93,7 +93,7 @@ class CryptoAPIService:
             'coingecko': 2.5,    # 10-30 req/min
             'coinpaprika': 1.0   # 60 req/min
         }
-        self.current_api = 'coincap'  # Primary API
+        self.current_api = 'coingecko'  # Primary API
     
     def _rate_limit(self, api_name):
         """Apply rate limiting for specific API"""
@@ -303,13 +303,13 @@ class CryptoAPIService:
     
     def search_coins(self, query):
         """Search coins with fallback"""
-        # Try CoinCap first
-        results, rate_limited = self.coincap_search(query)
+        # Try CoinGecko first
+        results, rate_limited = self.coingecko_search(query)
         if not rate_limited and results:
             return results, False
         
-        # Try CoinGecko as fallback
-        results, rate_limited = self.coingecko_search(query)
+        # Try CoinCap as fallback
+        results, rate_limited = self.coincap_search(query)
         if not rate_limited and results:
             return results, False
         
@@ -319,13 +319,13 @@ class CryptoAPIService:
     
     def get_coin_price(self, coin_ids):
         """Get prices with fallback"""
-        # Try CoinCap first
-        prices, rate_limited = self.coincap_get_prices(coin_ids)
+        # Try CoinGecko first
+        prices, rate_limited = self.coingecko_get_prices(coin_ids)
         if not rate_limited and prices:
             return prices, False
         
-        # Try CoinGecko as fallback
-        prices, rate_limited = self.coingecko_get_prices(coin_ids)
+        # Try CoinCap as fallback
+        prices, rate_limited = self.coincap_get_prices(coin_ids)
         if not rate_limited and prices:
             return prices, False
         
@@ -333,13 +333,13 @@ class CryptoAPIService:
     
     def get_coins_markets(self, coin_ids):
         """Get market data with fallback"""
-        # Try CoinCap first
-        results, rate_limited = self.coincap_get_markets(coin_ids)
+        # Try CoinGecko first
+        results, rate_limited = self.coingecko_get_markets(coin_ids)
         if not rate_limited and results:
             return results, False
         
-        # Try CoinGecko as fallback
-        results, rate_limited = self.coingecko_get_markets(coin_ids)
+        # Try CoinCap as fallback
+        results, rate_limited = self.coincap_get_markets(coin_ids)
         return results or [], rate_limited
 
 
@@ -822,6 +822,11 @@ def api_reorder_holding(holding_id):
         if direction not in ('up', 'down'):
             return jsonify({'error': 'Invalid direction. Use "up" or "down".'}), 400
         
+        # Ensure display_order is not NULL
+        if holding.display_order is None:
+            holding.display_order = Holding.query.filter_by(portfolio_id=holding.portfolio_id).count()
+            db.session.commit()
+        
         # Find neighbor to swap with
         query = Holding.query.filter_by(portfolio_id=holding.portfolio_id)
         
@@ -844,6 +849,83 @@ def api_reorder_holding(holding_id):
         logger.error(f"Error reordering holding: {e}")
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/portfolios/<int:portfolio_id>/holdings/order', methods=['POST'])
+@require_auth
+def api_order_holdings(portfolio_id):
+    """Order holdings by predefined criteria."""
+    try:
+        portfolio = Portfolio.query.get(portfolio_id)
+        if not portfolio:
+            return jsonify({'error': 'Portfolio not found'}), 404
+        
+        data = request.get_json() or {}
+        order_type = data.get('order_type')
+        
+        if not order_type:
+            return jsonify({'error': 'Order type is required'}), 400
+        
+        # Get all holdings
+        holdings = Holding.query.filter_by(portfolio_id=portfolio_id).all()
+        
+        if not holdings:
+            return jsonify({'success': True})
+        
+        # Apply ordering
+        if order_type == 'price_low_to_high':
+            holdings.sort(key=lambda h: h.current_price or 0)
+        elif order_type == 'price_high_to_low':
+            holdings.sort(key=lambda h: h.current_price or 0, reverse=True)
+        elif order_type == 'value_low_to_high':
+            holdings.sort(key=lambda h: h.current_value or 0)
+        elif order_type == 'value_high_to_low':
+            holdings.sort(key=lambda h: h.current_value or 0, reverse=True)
+        elif order_type == 'name_a_to_z':
+            holdings.sort(key=lambda h: h.name or '')
+        elif order_type == 'name_z_to_a':
+            holdings.sort(key=lambda h: h.name or '', reverse=True)
+        elif order_type == 'amount_low_to_high':
+            holdings.sort(key=lambda h: h.amount or 0)
+        elif order_type == 'amount_high_to_low':
+            holdings.sort(key=lambda h: h.amount or 0, reverse=True)
+        elif order_type == 'profit_loss_low_to_high':
+            holdings.sort(key=lambda h: ((h.current_price or 0) - (h.average_buy_price or 0)) * (h.amount or 0))
+        elif order_type == 'profit_loss_high_to_low':
+            holdings.sort(key=lambda h: ((h.current_price or 0) - (h.average_buy_price or 0)) * (h.amount or 0), reverse=True)
+        else:
+            return jsonify({'error': 'Invalid order type'}), 400
+        
+        # Update display_order
+        for i, holding in enumerate(holdings):
+            holding.display_order = i + 1
+        
+        db.session.commit()
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        logger.error(f"Error ordering holdings: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/order-types', methods=['GET'])
+@require_auth
+def api_get_order_types():
+    """Get available ordering options."""
+    order_types = [
+        {'type': 'price_low_to_high', 'label': 'Price (Low to High)', 'description': 'Sort by current price from lowest to highest'},
+        {'type': 'price_high_to_low', 'label': 'Price (High to Low)', 'description': 'Sort by current price from highest to lowest'},
+        {'type': 'value_low_to_high', 'label': 'Value (Low to High)', 'description': 'Sort by current value from lowest to highest'},
+        {'type': 'value_high_to_low', 'label': 'Value (High to Low)', 'description': 'Sort by current value from highest to lowest'},
+        {'type': 'name_a_to_z', 'label': 'Name (A to Z)', 'description': 'Sort alphabetically by coin name'},
+        {'type': 'name_z_to_a', 'label': 'Name (Z to A)', 'description': 'Sort alphabetically by coin name in reverse'},
+        {'type': 'amount_low_to_high', 'label': 'Amount (Low to High)', 'description': 'Sort by amount held from lowest to highest'},
+        {'type': 'amount_high_to_low', 'label': 'Amount (High to Low)', 'description': 'Sort by amount held from highest to lowest'},
+        {'type': 'profit_loss_low_to_high', 'label': 'P/L (Low to High)', 'description': 'Sort by profit/loss from lowest to highest'},
+        {'type': 'profit_loss_high_to_low', 'label': 'P/L (High to Low)', 'description': 'Sort by profit/loss from highest to lowest'}
+    ]
+    return jsonify(order_types)
 
 
 @app.route('/api/coins/search')
