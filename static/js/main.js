@@ -90,7 +90,6 @@ document.addEventListener('DOMContentLoaded', function() {
             localStorage.setItem('theme', next);
             const icon = themeBtn.querySelector('i');
             if (icon) icon.className = next === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
-            
             updateChartThemeColors(next);
         });
     }
@@ -115,7 +114,6 @@ function updateChartThemeColors(theme) {
     if (typeof allocationBarChart !== 'undefined' && allocationBarChart) {
         if (allocationBarChart.options.scales) {
             allocationBarChart.options.scales.x.ticks.color = textColor;
-            allocationBarChart.options.scales.x.grid.color = gridColor;
             allocationBarChart.options.scales.y.ticks.color = textColor;
             allocationBarChart.options.scales.y.grid.color = gridColor;
         }
@@ -149,19 +147,6 @@ function updateChartThemeColors(theme) {
             perfChart.options.scales.y.grid.color = gridColor;
         }
         perfChart.update();
-    }
-    
-    if (typeof compChart !== 'undefined' && compChart) {
-        if (compChart.options.plugins.legend) {
-            compChart.options.plugins.legend.labels.color = textColor;
-        }
-        if (compChart.options.scales) {
-            compChart.options.scales.x.ticks.color = textColor;
-            compChart.options.scales.x.grid.color = gridColor;
-            compChart.options.scales.y.ticks.color = textColor;
-            compChart.options.scales.y.grid.color = gridColor;
-        }
-        compChart.update();
     }
 }
 
@@ -242,6 +227,113 @@ function clearSelectedCoin() {
     document.getElementById('selectedCoin').style.display = 'none';
 }
 
+// ============== DUPLICATE COIN DIALOG ==============
+
+function showDuplicateCoinDialog(coinName, currentNote) {
+    return new Promise((resolve) => {
+        // Create modal overlay
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        `;
+        
+        // Create modal content
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            background: var(--bg-primary);
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        `;
+        
+        modal.innerHTML = `
+            <h3 style="margin: 0 0 16px 0; color: var(--text-primary); font-size: 18px;">
+                <i class="fas fa-exclamation-triangle" style="color: #f59e0b; margin-right: 8px;"></i>
+                Duplicate Coin Warning
+            </h3>
+            <p style="margin: 0 0 20px 0; color: var(--text-secondary); line-height: 1.5;">
+                "${coinName}" already exists in this portfolio.<br>
+                Are you sure you want to add another entry?
+            </p>
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; color: var(--text-primary); font-weight: 500;">
+                    Note (optional - helps distinguish entries):
+                </label>
+                <input type="text" id="duplicateNoteInput" 
+                    value="${currentNote}" 
+                    placeholder="e.g., Cold Wallet, Trading Account, DCA Purchase #1"
+                    style="width: 100%; padding: 10px 12px; border: 1px solid var(--border-color); 
+                           border-radius: 8px; background: var(--bg-secondary); color: var(--text-primary);
+                           font-size: 14px; box-sizing: border-box;">
+            </div>
+            <div style="display: flex; gap: 12px; justify-content: flex-end;">
+                <button id="cancelDuplicateBtn" 
+                    style="padding: 8px 16px; border: 1px solid var(--border-color); 
+                           background: var(--bg-secondary); color: var(--text-primary); 
+                           border-radius: 6px; cursor: pointer; font-size: 14px;">
+                    Cancel
+                </button>
+                <button id="confirmDuplicateBtn" 
+                    style="padding: 8px 16px; border: none; background: #3b82f6; 
+                           color: white; border-radius: 6px; cursor: pointer; font-size: 14px;">
+                    Add Anyway
+                </button>
+            </div>
+        `;
+        
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        
+        // Focus on note input
+        const noteInput = modal.querySelector('#duplicateNoteInput');
+        noteInput.focus();
+        noteInput.select();
+        
+        // Handle buttons
+        const cancelBtn = modal.querySelector('#cancelDuplicateBtn');
+        const confirmBtn = modal.querySelector('#confirmDuplicateBtn');
+        
+        cancelBtn.addEventListener('click', () => {
+            document.body.removeChild(overlay);
+            resolve({ confirmed: false, note: '' });
+        });
+        
+        confirmBtn.addEventListener('click', () => {
+            const noteValue = noteInput.value.trim();
+            document.body.removeChild(overlay);
+            resolve({ confirmed: true, note: noteValue });
+        });
+        
+        // Handle Enter key
+        noteInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                confirmBtn.click();
+            } else if (e.key === 'Escape') {
+                cancelBtn.click();
+            }
+        });
+        
+        // Close on overlay click
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                cancelBtn.click();
+            }
+        });
+    });
+}
+
 // ============== GLOBAL BUTTONS ==============
 
 function setupGlobalButtons() {
@@ -317,7 +409,7 @@ async function submitCreatePortfolio() {
         const res = await fetch('/api/portfolios', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: name, description: desc })
+            body: JSON.stringify({ name, description: desc })
         });
         
         if (res.ok) {
@@ -364,6 +456,26 @@ async function submitAddHolding() {
         return; 
     }
     
+    let note = '';
+    
+    // Check for duplicate coins
+    const existingHoldingsResponse = await fetch(`/api/portfolios/${portfolioId}`);
+    if (existingHoldingsResponse.ok) {
+        const portfolioData = await existingHoldingsResponse.json();
+        const existingCoin = portfolioData.holdings.find(h => h.coin_id === coinId);
+        
+        if (existingCoin) {
+            // Show warning for duplicate coin with note option
+            const result = await showDuplicateCoinDialog(existingCoin.name, note);
+            if (!result.confirmed) {
+                return;
+            }
+            
+            // Use note from dialog
+            note = result.note || '';
+        }
+    }
+    
     try {
         const res = await fetch(`/api/portfolios/${portfolioId}/holdings`, {
             method: 'POST',
@@ -374,7 +486,8 @@ async function submitAddHolding() {
                 name: document.getElementById('selectedCoinName').textContent,
                 amount: amount,
                 average_buy_price: avg,
-                image_url: document.getElementById('selectedCoinImage').src
+                image_url: document.getElementById('selectedCoinImage').src,
+                note: note
             })
         });
         

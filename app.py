@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, session
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func
 from datetime import datetime, date
@@ -8,6 +8,9 @@ import io
 import logging
 import requests
 import time
+import os
+from functools import wraps
+from database_encryption import db_encryption
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,10 +18,19 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///portfolio.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:instance/portfolio_encrypted.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+# Authentication decorator
+def require_auth(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not db_encryption.is_authenticated():
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 # ============== MODELS ==============
@@ -54,6 +66,7 @@ class Holding(db.Model):
     last_updated = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     display_order = db.Column(db.Integer, nullable=False, default=0)
+    note = db.Column(db.String(200), nullable=True, default='')  # Optional note to distinguish duplicates
 
 
 class Snapshot(db.Model):
@@ -66,6 +79,272 @@ class Snapshot(db.Model):
     holdings_data = db.Column(db.Text, nullable=False, default='[]')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_manual = db.Column(db.Boolean, default=False)
+
+
+# ============== CRYPTO API SERVICE ==============
+
+class CryptoAPIService:
+    """Multi-API service for crypto data with fallbacks"""
+    
+    def __init__(self):
+        self.last_request_time = {}
+        self.rate_limits = {
+            'coincap': 0.5,      # 200 req/min = ~0.3s, using 0.5s to be safe
+            'coingecko': 2.5,    # 10-30 req/min
+            'coinpaprika': 1.0   # 60 req/min
+        }
+        self.current_api = 'coincap'  # Primary API
+    
+    def _rate_limit(self, api_name):
+        """Apply rate limiting for specific API"""
+        now = time.time()
+        last = self.last_request_time.get(api_name, 0)
+        wait_time = self.rate_limits.get(api_name, 1.0)
+        
+        elapsed = now - last
+        if elapsed < wait_time:
+            time.sleep(wait_time - elapsed)
+        
+        self.last_request_time[api_name] = time.time()
+    
+    def _make_request(self, url, params=None, api_name='coincap'):
+        """Make a rate-limited request"""
+        self._rate_limit(api_name)
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            if response.status_code == 429:
+                logger.warning(f"{api_name} rate limited")
+                return None, True
+            response.raise_for_status()
+            return response.json(), False
+        except Exception as e:
+            logger.error(f"{api_name} API error: {e}")
+            return None, False
+    
+    # ============== COINCAP API ==============
+    
+    def coincap_search(self, query):
+        """Search coins using CoinCap API"""
+        url = "https://api.coincap.io/v2/assets"
+        params = {"search": query, "limit": 20}
+        data, rate_limited = self._make_request(url, params, 'coincap')
+        
+        if rate_limited:
+            return None, True
+        
+        if data and 'data' in data:
+            results = []
+            for coin in data['data']:
+                results.append({
+                    'id': coin.get('id', ''),
+                    'symbol': coin.get('symbol', ''),
+                    'name': coin.get('name', ''),
+                    'thumb': f"https://assets.coincap.io/assets/icons/{coin.get('symbol', '').lower()}@2x.png"
+                })
+            return results, False
+        return [], False
+    
+    def coincap_get_prices(self, coin_ids):
+        """Get prices from CoinCap API"""
+        prices = {}
+        
+        for coin_id in coin_ids:
+            url = f"https://api.coincap.io/v2/assets/{coin_id}"
+            data, rate_limited = self._make_request(url, api_name='coincap')
+            
+            if rate_limited:
+                return None, True
+            
+            if data and 'data' in data:
+                asset = data['data']
+                prices[coin_id] = {
+                    'usd': float(asset.get('priceUsd', 0)) if asset.get('priceUsd') else None,
+                    'usd_24h_change': float(asset.get('changePercent24Hr', 0)) if asset.get('changePercent24Hr') else None,
+                    'image': f"https://assets.coincap.io/assets/icons/{asset.get('symbol', '').lower()}@2x.png"
+                }
+        
+        return prices, False
+    
+    def coincap_get_markets(self, coin_ids):
+        """Get market data from CoinCap API"""
+        results = []
+        
+        for coin_id in coin_ids:
+            url = f"https://api.coincap.io/v2/assets/{coin_id}"
+            data, rate_limited = self._make_request(url, api_name='coincap')
+            
+            if rate_limited:
+                return None, True
+            
+            if data and 'data' in data:
+                asset = data['data']
+                results.append({
+                    'id': asset.get('id', ''),
+                    'symbol': asset.get('symbol', ''),
+                    'name': asset.get('name', ''),
+                    'current_price': float(asset.get('priceUsd', 0)) if asset.get('priceUsd') else None,
+                    'price_change_24h': None,
+                    'price_change_percentage_24h': float(asset.get('changePercent24Hr', 0)) if asset.get('changePercent24Hr') else None,
+                    'image': f"https://assets.coincap.io/assets/icons/{asset.get('symbol', '').lower()}@2x.png"
+                })
+        
+        return results, False
+    
+    # ============== COINGECKO API (Fallback) ==============
+    
+    def coingecko_search(self, query):
+        """Search coins using CoinGecko API"""
+        url = "https://api.coingecko.com/api/v3/search"
+        data, rate_limited = self._make_request(url, {"query": query}, 'coingecko')
+        
+        if rate_limited:
+            return None, True
+        
+        if data and 'coins' in data:
+            results = []
+            for coin in data['coins'][:20]:
+                results.append({
+                    'id': coin.get('id', ''),
+                    'symbol': coin.get('symbol', ''),
+                    'name': coin.get('name', ''),
+                    'thumb': coin.get('thumb', '')
+                })
+            return results, False
+        return [], False
+    
+    def coingecko_get_prices(self, coin_ids):
+        """Get prices from CoinGecko API"""
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": ",".join(coin_ids),
+            "vs_currencies": "usd",
+            "include_24hr_change": "true"
+        }
+        data, rate_limited = self._make_request(url, params, 'coingecko')
+        
+        if rate_limited:
+            return None, True
+        
+        if data:
+            prices = {}
+            for coin_id, price_data in data.items():
+                prices[coin_id] = {
+                    'usd': price_data.get('usd'),
+                    'usd_24h_change': price_data.get('usd_24h_change')
+                }
+            return prices, False
+        return {}, False
+    
+    def coingecko_get_markets(self, coin_ids):
+        """Get market data from CoinGecko API"""
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd",
+            "ids": ",".join(coin_ids),
+            "order": "market_cap_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false"
+        }
+        data, rate_limited = self._make_request(url, params, 'coingecko')
+        
+        if rate_limited:
+            return None, True
+        
+        return data or [], False
+    
+    # ============== COINPAPRIKA API (Fallback) ==============
+    
+    def coinpaprika_search(self, query):
+        """Search coins using CoinPaprika API"""
+        url = "https://api.coinpaprika.com/v1/search"
+        params = {"q": query, "limit": 20}
+        data, rate_limited = self._make_request(url, params, 'coinpaprika')
+        
+        if rate_limited:
+            return None, True
+        
+        if data and 'currencies' in data:
+            results = []
+            for coin in data['currencies']:
+                coin_id = coin.get('id', '')
+                results.append({
+                    'id': coin_id,
+                    'symbol': coin.get('symbol', ''),
+                    'name': coin.get('name', ''),
+                    'thumb': f"https://static.coinpaprika.com/coin/{coin_id}/logo.png" if coin_id else ''
+                })
+            return results, False
+        return [], False
+    
+    def coinpaprika_get_prices(self, coin_ids):
+        """Get prices from CoinPaprika API"""
+        prices = {}
+        
+        for coin_id in coin_ids:
+            # CoinPaprika uses different ID format, try to map
+            url = f"https://api.coinpaprika.com/v1/tickers/{coin_id}"
+            data, rate_limited = self._make_request(url, api_name='coinpaprika')
+            
+            if rate_limited:
+                return None, True
+            
+            if data and 'quotes' in data:
+                usd_data = data['quotes'].get('USD', {})
+                prices[coin_id] = {
+                    'usd': usd_data.get('price'),
+                    'usd_24h_change': usd_data.get('percent_change_24h'),
+                    'image': f"https://static.coinpaprika.com/coin/{coin_id}/logo.png"
+                }
+        
+        return prices, False
+    
+    # ============== UNIFIED METHODS ==============
+    
+    def search_coins(self, query):
+        """Search coins with fallback"""
+        # Try CoinCap first
+        results, rate_limited = self.coincap_search(query)
+        if not rate_limited and results:
+            return results, False
+        
+        # Try CoinGecko as fallback
+        results, rate_limited = self.coingecko_search(query)
+        if not rate_limited and results:
+            return results, False
+        
+        # Try CoinPaprika as last resort
+        results, rate_limited = self.coinpaprika_search(query)
+        return results or [], rate_limited
+    
+    def get_coin_price(self, coin_ids):
+        """Get prices with fallback"""
+        # Try CoinCap first
+        prices, rate_limited = self.coincap_get_prices(coin_ids)
+        if not rate_limited and prices:
+            return prices, False
+        
+        # Try CoinGecko as fallback
+        prices, rate_limited = self.coingecko_get_prices(coin_ids)
+        if not rate_limited and prices:
+            return prices, False
+        
+        return {}, rate_limited
+    
+    def get_coins_markets(self, coin_ids):
+        """Get market data with fallback"""
+        # Try CoinCap first
+        results, rate_limited = self.coincap_get_markets(coin_ids)
+        if not rate_limited and results:
+            return results, False
+        
+        # Try CoinGecko as fallback
+        results, rate_limited = self.coingecko_get_markets(coin_ids)
+        return results or [], rate_limited
+
+
+# Initialize crypto API service
+crypto_api = CryptoAPIService()
 
 
 # ============== HELPER FUNCTIONS ==============
@@ -99,7 +378,8 @@ def serialize_portfolio(p):
                 'last_updated': h.last_updated.isoformat() if h.last_updated else None,
                 'profit_loss': 0,
                 'profit_loss_percentage': 0,
-                'display_order': h.display_order or 0
+                'display_order': h.display_order or 0,
+                'note': h.note or ''
             }
             
             if hd['average_buy_price'] and hd['current_price'] and hd['amount']:
@@ -148,71 +428,6 @@ def serialize_snapshot(s):
     }
 
 
-def get_coin_price(coin_ids):
-    """Get prices from CoinGecko"""
-    try:
-        time.sleep(1.5)
-        url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {
-            "ids": ",".join(coin_ids),
-            "vs_currencies": "usd",
-            "include_24hr_change": "true"
-        }
-        response = requests.get(url, params=params, timeout=30)
-        
-        if response.status_code == 429:
-            return None, True
-        
-        response.raise_for_status()
-        return response.json(), False
-    except Exception as e:
-        logger.error(f"CoinGecko error: {e}")
-        return None, False
-
-
-def search_coins(query):
-    """Search coins on CoinGecko"""
-    try:
-        time.sleep(1.5)
-        url = "https://api.coingecko.com/api/v3/search"
-        response = requests.get(url, params={"query": query}, timeout=30)
-        
-        if response.status_code == 429:
-            return None, True
-        
-        response.raise_for_status()
-        data = response.json()
-        return data.get("coins", [])[:20], False
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        return [], False
-
-
-def get_coins_markets(coin_ids):
-    """Get market data from CoinGecko"""
-    try:
-        time.sleep(1.5)
-        url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "ids": ",".join(coin_ids),
-            "order": "market_cap_desc",
-            "per_page": 250,
-            "page": 1,
-            "sparkline": "false"
-        }
-        response = requests.get(url, params=params, timeout=30)
-        
-        if response.status_code == 429:
-            return None, True
-        
-        response.raise_for_status()
-        return response.json(), False
-    except Exception as e:
-        logger.error(f"Markets error: {e}")
-        return [], False
-
-
 def update_all_prices():
     """Update prices for all holdings"""
     try:
@@ -220,28 +435,38 @@ def update_all_prices():
         if not holdings:
             return {'success': True}
         
+        # Get unique coin IDs
         coin_ids = list(set(h.coin_id for h in holdings if h.coin_id))
         if not coin_ids:
             return {'success': True}
         
-        market_data, rate_limited = get_coins_markets(coin_ids)
+        # Batch process to avoid rate limits
+        batch_size = 10
+        all_prices = {}
         
-        if rate_limited:
-            return {'success': False, 'rate_limited': True}
+        for i in range(0, len(coin_ids), batch_size):
+            batch = coin_ids[i:i + batch_size]
+            market_data, rate_limited = crypto_api.get_coins_markets(batch)
+            
+            if rate_limited:
+                logger.warning("Rate limited during price update")
+                # Continue with what we have
+                break
+            
+            if market_data:
+                for coin in market_data:
+                    all_prices[coin['id']] = coin
         
-        if not market_data:
-            return {'success': False, 'error': 'No market data'}
-        
-        price_lookup = {coin['id']: coin for coin in market_data}
-        
+        # Update holdings
         for holding in holdings:
-            if holding.coin_id in price_lookup:
-                coin = price_lookup[holding.coin_id]
+            if holding.coin_id in all_prices:
+                coin = all_prices[holding.coin_id]
                 holding.current_price = coin.get('current_price')
                 holding.current_value = (holding.current_price or 0) * (holding.amount or 0)
                 holding.price_change_24h = coin.get('price_change_24h')
                 holding.price_change_percentage_24h = coin.get('price_change_percentage_24h')
-                holding.image_url = coin.get('image')
+                if coin.get('image'):
+                    holding.image_url = coin.get('image')
                 holding.last_updated = datetime.utcnow()
         
         db.session.commit()
@@ -274,7 +499,8 @@ def create_snapshot_for_portfolio(portfolio, is_manual=False):
             'current_value': float(h.current_value) if h.current_value else 0,
             'average_buy_price': float(h.average_buy_price) if h.average_buy_price else None,
             'image_url': h.image_url or '',
-            'display_order': h.display_order or 0
+            'display_order': h.display_order or 0,
+            'note': h.note or ''
         }
         holdings_data.append(hd)
         total_value += hd['current_value']
@@ -299,24 +525,82 @@ def create_snapshot_for_portfolio(portfolio, is_manual=False):
         return snapshot
 
 
+# ============== AUTHENTICATION ROUTES ==============
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    info = None
+    first_time = False
+    
+    # Check if database exists
+    if not os.path.exists('portfolio_encrypted.db'):
+        first_time = True
+        info = "Creating new encrypted database. Please choose a strong password."
+    
+    if request.method == 'POST':
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not password:
+            error = "Password is required"
+        elif first_time and password != confirm_password:
+            error = "Passwords do not match"
+        elif len(password) < 8:
+            error = "Password must be at least 8 characters long"
+        else:
+            if first_time:
+                # Initialize new database
+                if db_encryption.init_database(password):
+                    # Try to migrate existing data if available
+                    if os.path.exists('portfolio.db'):
+                        if db_encryption.migrate_existing_database('portfolio.db', password):
+                            info = "Database created and existing data migrated successfully!"
+                        else:
+                            info = "Database created! (Migration of old data failed)"
+                    
+                    if db_encryption.authenticate(password):
+                        return redirect(url_for('index'))
+                else:
+                    error = "Failed to initialize database"
+            else:
+                # Try to authenticate with existing database
+                if db_encryption.authenticate(password):
+                    return redirect(url_for('index'))
+                else:
+                    error = "Invalid password"
+    
+    return render_template('login.html', error=error, info=info, first_time=first_time)
+
+
+@app.route('/logout')
+def logout():
+    db_encryption.logout()
+    return redirect(url_for('login'))
+
+
 # ============== PAGE ROUTES ==============
 
 @app.route('/')
+@require_auth
 def index():
     return render_template('index.html')
 
 
 @app.route('/portfolio/<int:portfolio_id>')
+@require_auth
 def portfolio_detail(portfolio_id):
     return render_template('portfolio.html', portfolio_id=portfolio_id)
 
 
 @app.route('/snapshots')
+@require_auth
 def snapshots_page():
     return render_template('snapshots.html')
 
 
 @app.route('/compare')
+@require_auth
 def compare_page():
     return render_template('compare.html')
 
@@ -324,6 +608,7 @@ def compare_page():
 # ============== API ROUTES ==============
 
 @app.route('/api/portfolios', methods=['GET'])
+@require_auth
 def api_get_portfolios():
     try:
         portfolios = Portfolio.query.all()
@@ -335,6 +620,7 @@ def api_get_portfolios():
 
 
 @app.route('/api/portfolios', methods=['POST'])
+@require_auth
 def api_create_portfolio():
     try:
         data = request.get_json() or {}
@@ -352,6 +638,7 @@ def api_create_portfolio():
 
 
 @app.route('/api/portfolios/<int:portfolio_id>', methods=['GET'])
+@require_auth
 def api_get_portfolio(portfolio_id):
     try:
         portfolio = Portfolio.query.get(portfolio_id)
@@ -364,6 +651,7 @@ def api_get_portfolio(portfolio_id):
 
 
 @app.route('/api/portfolios/<int:portfolio_id>', methods=['PUT'])
+@require_auth
 def api_update_portfolio(portfolio_id):
     try:
         portfolio = Portfolio.query.get(portfolio_id)
@@ -385,6 +673,7 @@ def api_update_portfolio(portfolio_id):
 
 
 @app.route('/api/portfolios/<int:portfolio_id>', methods=['DELETE'])
+@require_auth
 def api_delete_portfolio(portfolio_id):
     try:
         portfolio = Portfolio.query.get(portfolio_id)
@@ -401,7 +690,9 @@ def api_delete_portfolio(portfolio_id):
 
 
 @app.route('/api/portfolios/<int:portfolio_id>/holdings', methods=['POST'])
+@require_auth
 def api_add_holding(portfolio_id):
+    """Add a holding - ALWAYS creates a new row (duplicates allowed)"""
     try:
         portfolio = Portfolio.query.get(portfolio_id)
         if not portfolio:
@@ -412,46 +703,35 @@ def api_add_holding(portfolio_id):
         if not data.get('coin_id'):
             return jsonify({'error': 'coin_id is required'}), 400
         
-        existing = Holding.query.filter_by(
-            portfolio_id=portfolio_id,
-            coin_id=data['coin_id']
-        ).first()
+        # Determine next display_order
+        max_order = db.session.query(func.max(Holding.display_order))\
+            .filter_by(portfolio_id=portfolio_id).scalar() or 0
         
-        if existing:
-            existing.amount = (existing.amount or 0) + (data.get('amount') or 0)
-            if data.get('average_buy_price'):
-                old_amount = (existing.amount or 0) - (data.get('amount') or 0)
-                old_value = old_amount * (existing.average_buy_price or 0)
-                new_value = (data.get('amount') or 0) * (data.get('average_buy_price') or 0)
-                if existing.amount > 0:
-                    existing.average_buy_price = (old_value + new_value) / existing.amount
-            holding = existing
-        else:
-            # Determine next display_order
-            max_order = db.session.query(func.max(Holding.display_order))\
-                .filter_by(portfolio_id=portfolio_id).scalar() or 0
-            
-            holding = Holding(
-                portfolio_id=portfolio_id,
-                coin_id=data.get('coin_id', ''),
-                symbol=data.get('symbol', ''),
-                name=data.get('name', ''),
-                amount=data.get('amount') or 0,
-                average_buy_price=data.get('average_buy_price'),
-                image_url=data.get('image_url', ''),
-                display_order=max_order + 1
-            )
-            db.session.add(holding)
+        # ALWAYS create a new holding (duplicates allowed)
+        holding = Holding(
+            portfolio_id=portfolio_id,
+            coin_id=data.get('coin_id', ''),
+            symbol=data.get('symbol', ''),
+            name=data.get('name', ''),
+            amount=data.get('amount') or 0,
+            average_buy_price=data.get('average_buy_price'),
+            image_url=data.get('image_url', ''),
+            display_order=max_order + 1,
+            note=data.get('note', '')  # Optional note to distinguish entries
+        )
+        db.session.add(holding)
         
         # Try to get price
         rate_limited = False
         try:
-            price_data, rate_limited = get_coin_price([holding.coin_id])
-            if price_data and holding.coin_id in price_data:
-                coin_price = price_data[holding.coin_id]
-                holding.current_price = coin_price.get('usd')
+            prices, rate_limited = crypto_api.get_coin_price([holding.coin_id])
+            if prices and holding.coin_id in prices:
+                price_data = prices[holding.coin_id]
+                holding.current_price = price_data.get('usd')
                 holding.current_value = (holding.current_price or 0) * (holding.amount or 0)
-                holding.price_change_percentage_24h = coin_price.get('usd_24h_change')
+                holding.price_change_percentage_24h = price_data.get('usd_24h_change')
+                if price_data.get('image'):
+                    holding.image_url = price_data.get('image')
                 holding.last_updated = datetime.utcnow()
         except Exception as e:
             logger.error(f"Error fetching price: {e}")
@@ -467,7 +747,8 @@ def api_add_holding(portfolio_id):
             'amount': holding.amount,
             'current_price': holding.current_price,
             'current_value': holding.current_value,
-            'display_order': holding.display_order
+            'display_order': holding.display_order,
+            'note': holding.note
         }
         
         if rate_limited:
@@ -483,6 +764,7 @@ def api_add_holding(portfolio_id):
 
 
 @app.route('/api/holdings/<int:holding_id>', methods=['PUT'])
+@require_auth
 def api_update_holding(holding_id):
     try:
         holding = Holding.query.get(holding_id)
@@ -495,6 +777,8 @@ def api_update_holding(holding_id):
             holding.amount = data['amount']
         if 'average_buy_price' in data:
             holding.average_buy_price = data['average_buy_price']
+        if 'note' in data:
+            holding.note = data['note']
         
         if holding.current_price:
             holding.current_value = (holding.current_price or 0) * (holding.amount or 0)
@@ -508,6 +792,7 @@ def api_update_holding(holding_id):
 
 
 @app.route('/api/holdings/<int:holding_id>', methods=['DELETE'])
+@require_auth
 def api_delete_holding(holding_id):
     try:
         holding = Holding.query.get(holding_id)
@@ -524,6 +809,7 @@ def api_delete_holding(holding_id):
 
 
 @app.route('/api/holdings/<int:holding_id>/reorder', methods=['POST'])
+@require_auth
 def api_reorder_holding(holding_id):
     """Move a holding up or down within its portfolio."""
     try:
@@ -561,15 +847,16 @@ def api_reorder_holding(holding_id):
 
 
 @app.route('/api/coins/search')
+@require_auth
 def api_search_coins():
     query = request.args.get('q', '')
     if len(query) < 2:
         return jsonify([])
     
     try:
-        results, rate_limited = search_coins(query)
+        results, rate_limited = crypto_api.search_coins(query)
         if rate_limited:
-            return jsonify({'error': 'Rate limited', 'rate_limited': True}), 429
+            return jsonify({'error': 'Rate limited. Please try again.', 'rate_limited': True}), 429
         return jsonify(results or [])
     except Exception as e:
         logger.error(f"Search error: {e}")
@@ -577,6 +864,7 @@ def api_search_coins():
 
 
 @app.route('/api/refresh-prices', methods=['POST'])
+@require_auth
 def api_refresh_prices():
     try:
         result = update_all_prices()
@@ -593,6 +881,7 @@ def api_refresh_prices():
 
 
 @app.route('/api/snapshots', methods=['GET'])
+@require_auth
 def api_get_snapshots():
     try:
         portfolio_id = request.args.get('portfolio_id', type=int)
@@ -609,6 +898,7 @@ def api_get_snapshots():
 
 
 @app.route('/api/snapshots/<int:snapshot_id>', methods=['GET'])
+@require_auth
 def api_get_snapshot(snapshot_id):
     try:
         snapshot = Snapshot.query.get(snapshot_id)
@@ -621,6 +911,7 @@ def api_get_snapshot(snapshot_id):
 
 
 @app.route('/api/snapshots/<int:snapshot_id>', methods=['DELETE'])
+@require_auth
 def api_delete_snapshot(snapshot_id):
     try:
         snapshot = Snapshot.query.get(snapshot_id)
@@ -637,6 +928,7 @@ def api_delete_snapshot(snapshot_id):
 
 
 @app.route('/api/portfolios/<int:portfolio_id>/snapshot', methods=['POST'])
+@require_auth
 def api_create_snapshot(portfolio_id):
     try:
         portfolio = Portfolio.query.get(portfolio_id)
@@ -655,6 +947,7 @@ def api_create_snapshot(portfolio_id):
 
 
 @app.route('/api/trigger-all-snapshots', methods=['POST'])
+@require_auth
 def api_trigger_all_snapshots():
     try:
         update_all_prices()
@@ -672,6 +965,7 @@ def api_trigger_all_snapshots():
 
 
 @app.route('/api/compare-snapshots', methods=['POST'])
+@require_auth
 def api_compare_snapshots():
     try:
         data = request.get_json() or {}
@@ -708,6 +1002,7 @@ def api_compare_snapshots():
 
 
 @app.route('/api/export/portfolio/<int:portfolio_id>')
+@require_auth
 def api_export_portfolio(portfolio_id):
     try:
         portfolio = Portfolio.query.get(portfolio_id)
@@ -726,7 +1021,7 @@ def api_export_portfolio(portfolio_id):
         writer.writerow(['Portfolio:', portfolio.name])
         writer.writerow(['Export Date:', datetime.now().isoformat()])
         writer.writerow([])
-        writer.writerow(['Order', 'Symbol', 'Name', 'Amount', 'Price', 'Value', 'Avg Buy', 'P/L'])
+        writer.writerow(['Order', 'Symbol', 'Name', 'Note', 'Amount', 'Price', 'Value', 'Avg Buy', 'P/L'])
         
         for h in ordered_holdings:
             pl = 0
@@ -737,6 +1032,53 @@ def api_export_portfolio(portfolio_id):
                 h.display_order or 0,
                 h.symbol or '',
                 h.name or '',
+                h.note or '',
+                h.amount or 0,
+                h.current_price or 0,
+                h.current_value or 0,
+                h.average_buy_price or 0,
+                pl
+            ])
+        
+        output.seek(0)
+        return send_file(
+            io.BytesIO(output.getvalue().encode()),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f'portfolio_{portfolio_id}_{datetime.now().strftime("%Y%m%d")}.csv'
+        )
+    except Exception as e:
+        logger.error(f"Error exporting: {e}")
+        return jsonify({'error': str(e)}), 500
+    try:
+        portfolio = Portfolio.query.get(portfolio_id)
+        if not portfolio:
+            return jsonify({'error': 'Portfolio not found'}), 404
+        
+        # Sort holdings by display_order
+        ordered_holdings = sorted(
+            portfolio.holdings,
+            key=lambda h: ((h.display_order or 0), h.id)
+        )
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        writer.writerow(['Portfolio:', portfolio.name])
+        writer.writerow(['Export Date:', datetime.now().isoformat()])
+        writer.writerow([])
+        writer.writerow(['Order', 'Symbol', 'Name', 'Note', 'Amount', 'Price', 'Value', 'Avg Buy', 'P/L'])
+        
+        for h in ordered_holdings:
+            pl = 0
+            if h.average_buy_price and h.current_price and h.amount:
+                pl = (h.current_price - h.average_buy_price) * h.amount
+            
+            writer.writerow([
+                h.display_order or 0,
+                h.symbol or '',
+                h.name or '',
+                h.note or '',
                 h.amount or 0,
                 h.current_price or 0,
                 h.current_value or 0,
@@ -758,15 +1100,18 @@ def api_export_portfolio(portfolio_id):
 
 # ============== INITIALIZE ==============
 
+# Create tables if they don't exist
 with app.app_context():
     db.create_all()
     
-    # Create default portfolio if none exists
+    # Create default portfolio if none exist
     if Portfolio.query.count() == 0:
-        default = Portfolio(name="Main Portfolio", description="Your primary crypto portfolio")
-        db.session.add(default)
+        default_portfolio = Portfolio(
+            name='My Portfolio',
+            description='Default portfolio for tracking cryptocurrency holdings'
+        )
+        db.session.add(default_portfolio)
         db.session.commit()
-        logger.info("Created default portfolio")
 
 
 if __name__ == '__main__':

@@ -92,8 +92,9 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th>Order</th>
+                                <th>#</th>
                                 <th>Asset</th>
+                                <th>Note</th>
                                 <th>Amount</th>
                                 <th>Price</th>
                                 <th>Value</th>
@@ -105,7 +106,7 @@
                             </tr>
                         </thead>
                         <tbody id="holdingsTableBody">
-                            <tr><td colspan="10"><div class="loading-state"><div class="spinner"></div></div></td></tr>
+                            <tr><td colspan="11"><div class="loading-state"><div class="spinner"></div></div></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -174,7 +175,7 @@ function renderHoldings(holdings, totalValue) {
     
     if (!holdings.length) {
         tbody.innerHTML = `
-            <tr><td colspan="10">
+            <tr><td colspan="11">
                 <div class="empty-state small">
                     <div class="empty-state-icon"><i class="fas fa-coins"></i></div>
                     <h3>No Holdings</h3>
@@ -209,6 +210,9 @@ function renderHoldings(holdings, totalValue) {
                         <span class="asset-symbol">${(h.symbol || '').toUpperCase()}</span>
                     </div>
                 </div>
+            </td>
+            <td>
+                <span class="holding-note">${h.note || '—'}</span>
             </td>
             <td class="text-mono">${formatNumber(h.amount, 6)}</td>
             <td class="text-mono">$${h.current_price ? formatNumber(h.current_price, 4) : 'N/A'}</td>
@@ -283,10 +287,7 @@ function initCharts() {
                         labels: {
                             color: textColor,
                             padding: 15,
-                            font: {
-                                size: 12,
-                                family: 'Inter, sans-serif'
-                            },
+                            font: { size: 12, family: 'Inter, sans-serif' },
                             usePointStyle: true,
                             pointStyle: 'circle',
                             generateLabels: function(chart) {
@@ -319,9 +320,6 @@ function initCharts() {
                         titleColor: '#fff',
                         bodyColor: '#cbd5e1',
                         padding: 12,
-                        borderColor: '#334155',
-                        borderWidth: 1,
-                        displayColors: true,
                         callbacks: {
                             label: function(ctx) {
                                 const value = ctx.raw;
@@ -340,49 +338,23 @@ function initCharts() {
     if (perfCtx) {
         perfChart = new Chart(perfCtx, {
             type: 'bar',
-            data: { 
-                labels: [], 
-                datasets: [{ 
-                    data: [], 
-                    backgroundColor: [], 
-                    borderRadius: 6 
-                }] 
-            },
+            data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderRadius: 6 }] },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: { 
                     legend: { display: false },
                     tooltip: {
-                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
-                        titleColor: '#fff',
-                        bodyColor: '#cbd5e1',
-                        padding: 12,
                         callbacks: {
-                            label: function(ctx) {
-                                return ctx.raw.toFixed(2) + '%';
-                            }
+                            label: function(ctx) { return ctx.raw.toFixed(2) + '%'; }
                         }
                     }
                 },
                 scales: {
-                    x: { 
-                        grid: { display: false }, 
-                        ticks: { 
-                            color: textColor,
-                            font: { family: 'Inter, sans-serif' }
-                        } 
-                    },
+                    x: { grid: { display: false }, ticks: { color: textColor } },
                     y: { 
-                        grid: { 
-                            color: gridColor,
-                            drawBorder: false 
-                        }, 
-                        ticks: { 
-                            color: textColor,
-                            font: { family: 'Inter, sans-serif' },
-                            callback: function(v) { return v + '%'; } 
-                        } 
+                        grid: { color: gridColor, drawBorder: false }, 
+                        ticks: { color: textColor, callback: function(v) { return v + '%'; } } 
                     }
                 }
             }
@@ -395,10 +367,9 @@ function initCharts() {
 function updateCharts(holdings, totalValue) {
     if (!chartsReady) return;
     
-    // Use holdings in the order provided (already sorted by display_order from backend)
     const ordered = holdings.slice();
     
-    // Allocation Chart
+    // Allocation Chart - aggregate by symbol for cleaner view
     if (allocationChart) {
         if (!ordered.length || totalValue <= 0) {
             allocationChart.data.labels = ['No Data'];
@@ -406,9 +377,22 @@ function updateCharts(holdings, totalValue) {
             allocationChart.data.datasets[0].backgroundColor = ['#374151'];
             allocationChart.update();
         } else {
-            const nonZero = ordered.filter(h => (h.current_value || 0) > 0);
-            const labels = nonZero.map(h => (h.symbol || '').toUpperCase());
-            const values = nonZero.map(h => h.current_value || 0);
+            // Aggregate same symbols for chart
+            const aggregated = {};
+            ordered.forEach(h => {
+                const symbol = (h.symbol || '').toUpperCase();
+                if (!aggregated[symbol]) {
+                    aggregated[symbol] = 0;
+                }
+                aggregated[symbol] += h.current_value || 0;
+            });
+            
+            const sorted = Object.entries(aggregated)
+                .filter(([, v]) => v > 0)
+                .sort(([, a], [, b]) => b - a);
+            
+            const labels = sorted.map(([s]) => s);
+            const values = sorted.map(([, v]) => v);
             const colors = generateColors(labels.length);
             
             allocationChart.data.labels = labels;
@@ -418,14 +402,24 @@ function updateCharts(holdings, totalValue) {
         }
     }
     
-    // Performance Chart
+    // Performance Chart - show each holding separately
     if (perfChart) {
         if (!ordered.length) {
             perfChart.data.labels = [];
             perfChart.data.datasets[0].data = [];
             perfChart.update();
         } else {
-            const labels = ordered.map(h => (h.symbol || '').toUpperCase());
+            // Create unique labels for duplicates
+            const labelCounts = {};
+            const labels = ordered.map(h => {
+                const symbol = (h.symbol || '').toUpperCase();
+                labelCounts[symbol] = (labelCounts[symbol] || 0) + 1;
+                if (labelCounts[symbol] > 1) {
+                    return `${symbol} #${labelCounts[symbol]}`;
+                }
+                return symbol;
+            });
+            
             const perf = ordered.map(h => h.price_change_percentage_24h || 0);
             const perfColors = perf.map(v => v >= 0 ? '#10b981' : '#ef4444');
             
@@ -469,6 +463,7 @@ function editHolding(id) {
     document.getElementById('editHoldingId').value = id;
     document.getElementById('editHoldingAmount').value = h.amount;
     document.getElementById('editAverageBuyPrice').value = h.average_buy_price || '';
+    document.getElementById('editHoldingNote').value = h.note || '';
     openModal('editHoldingModal');
 }
 
@@ -476,6 +471,7 @@ async function submitEditHolding() {
     const id = document.getElementById('editHoldingId').value;
     const amount = parseFloat(document.getElementById('editHoldingAmount').value);
     const avg = parseFloat(document.getElementById('editAverageBuyPrice').value) || null;
+    const note = document.getElementById('editHoldingNote').value || '';
     
     if (isNaN(amount) || amount <= 0) {
         showToast('Enter valid amount', 'error');
@@ -486,7 +482,7 @@ async function submitEditHolding() {
         const res = await fetch(`/api/holdings/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ amount: amount, average_buy_price: avg })
+            body: JSON.stringify({ amount, average_buy_price: avg, note })
         });
         if (res.ok) {
             showToast('Updated', 'success');
@@ -515,7 +511,9 @@ async function deleteHolding() {
 document.getElementById('holdingsSearch').addEventListener('input', function() {
     const q = this.value.toLowerCase();
     const filtered = (currentPortfolio?.holdings || []).filter(h =>
-        (h.name || '').toLowerCase().includes(q) || (h.symbol || '').toLowerCase().includes(q)
+        (h.name || '').toLowerCase().includes(q) || 
+        (h.symbol || '').toLowerCase().includes(q) ||
+        (h.note || '').toLowerCase().includes(q)
     );
     renderHoldings(filtered, currentPortfolio?.totalValue || 0);
 });

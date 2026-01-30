@@ -5,34 +5,42 @@ A web-based cryptocurrency portfolio tracking application built with Flask that 
 ## Features
 
 - **Portfolio Management**: Create and manage multiple cryptocurrency portfolios
-- **Holdings Tracking**: Add, update, and remove cryptocurrency holdings from your portfolios
-- **Real-time Price Data**: Fetch current cryptocurrency prices from CoinGecko API
+- **Holdings Tracking**: Add, update, and remove cryptocurrency holdings from your portfolios (duplicates allowed with notes)
+- **Multi-API Price Data**: Fetch prices from CoinCap, CoinGecko, and CoinPaprika with automatic fallback
+- **Database Encryption**: Password-protected encrypted database for security
 - **Performance Metrics**: Track profit/loss, price changes, and portfolio value over time
 - **Portfolio Snapshots**: Automatically capture portfolio snapshots to analyze historical performance
 - **Comparison Tool**: Compare multiple portfolios side-by-side
 - **Data Export**: Export portfolio data to CSV format
 - **Responsive UI**: Clean, modern web interface for easy portfolio management
+- **Automatic Database Setup**: Tables and default portfolio created automatically on first run
 
 ## Technology Stack
 
 - **Backend**: Flask 3.0.0 - Python web framework
-- **Database**: SQLite - Lightweight relational database
+- **Database**: SQLite with encryption - Lightweight relational database
 - **Frontend**: HTML5, CSS3, JavaScript
-- **API Integration**: CoinGecko API for real-time cryptocurrency data
+- **API Integration**: Multi-API support (CoinCap, CoinGecko, CoinPaprika) with rate limiting
 - **ORM**: Flask-SQLAlchemy for database management
 - **HTTP Client**: Requests library for API calls
+- **Security**: Database encryption with password authentication
 
 ## Project Structure
 
 ```
 portfolio_tracker/
-├── app.py                 # Main Flask application
+├── app.py                 # Main Flask application with integrated crypto API service
 ├── models.py              # Database models (Portfolio, Holding, Snapshot)
 ├── config.py              # Configuration settings
-├── coingecko_service.py   # CoinGecko API integration
+├── coingecko_service.py   # Legacy CoinGecko API integration
 ├── scheduler.py           # Background task scheduler for snapshots
+├── database_encryption.py # Database encryption and authentication system
+├── migrate_to_encrypted.py # Migration script for existing databases
+├── ENCRYPTION_README.md   # Database encryption documentation
 ├── requirements.txt       # Python dependencies
 ├── LICENSE                # Project license
+├── instance/              # Instance folder for encrypted database
+│   └── portfolio_encrypted.db  # Encrypted SQLite database
 ├── static/
 │   ├── css/
 │   │   └── style.css      # Stylesheet
@@ -43,7 +51,8 @@ portfolio_tracker/
     ├── index.html         # Home/dashboard page
     ├── portfolio.html     # Portfolio detail page
     ├── compare.html       # Portfolio comparison page
-    └── snapshots.html     # Snapshot history page
+    ├── snapshots.html     # Snapshot history page
+    └── login.html         # Authentication page
 ```
 
 ## Database Models
@@ -60,7 +69,7 @@ portfolio_tracker/
 ### Holding
 - `id`: Primary key
 - `portfolio_id`: Foreign key to portfolio
-- `coin_id`: CoinGecko cryptocurrency ID
+- `coin_id`: Multi-API cryptocurrency ID (CoinCap, CoinGecko, or CoinPaprika)
 - `symbol`: Cryptocurrency symbol (e.g., BTC, ETH)
 - `name`: Cryptocurrency name
 - `amount`: Quantity held
@@ -72,6 +81,8 @@ portfolio_tracker/
 - `image_url`: Cryptocurrency logo URL
 - `last_updated`: Last price update timestamp
 - `created_at`: Creation timestamp
+- `display_order`: Order for displaying holdings in portfolio
+- `note`: Optional note to distinguish duplicate holdings
 
 ### Snapshot
 - `id`: Primary key
@@ -113,16 +124,18 @@ portfolio_tracker/
 4. **Configure the application**
    - Edit `config.py` to customize settings
    - Update `SECRET_KEY` for production use
-   - Set database URI if using a different database
+   - Database is automatically configured and encrypted
 
-5. **Initialize the database**
+5. **Run the application**
    ```bash
-   python
-   >>> from app import app, db
-   >>> with app.app_context():
-   ...     db.create_all()
-   >>> exit()
+   python app.py
    ```
+   
+   The first time you run the application:
+   - Database tables will be created automatically
+   - A default portfolio named "My Portfolio" will be created
+   - You'll be prompted to set up database encryption with a password
+   - The encrypted database will be stored in the `/instance/` folder
 
 ## Usage
 
@@ -134,9 +147,17 @@ python app.py
 
 The application will be available at `http://localhost:5000`
 
-### Creating a Portfolio
+### First-Time Setup
 
-1. Navigate to the home page
+1. Navigate to `http://localhost:5000`
+2. You'll be redirected to the login page for database setup
+3. Choose a strong password (minimum 8 characters)
+4. Confirm your password
+5. The encrypted database will be initialized with a default portfolio
+
+### Creating Additional Portfolios
+
+1. After logging in, navigate to the home page
 2. Click "Create New Portfolio"
 3. Enter portfolio name and description
 4. Submit to create
@@ -145,9 +166,12 @@ The application will be available at `http://localhost:5000`
 
 1. Go to your portfolio
 2. Click "Add Holding"
-3. Select cryptocurrency from the list
+3. Search and select cryptocurrency from the list (uses multiple APIs)
 4. Enter amount and average buy price
-5. Submit to add to portfolio
+5. Optionally add a note to distinguish holdings
+6. Submit to add to portfolio
+
+**Note**: Duplicate holdings are allowed - use the note field to distinguish between different purchase batches or strategies.
 
 ### Viewing Portfolio Data
 
@@ -163,21 +187,32 @@ The application will be available at `http://localhost:5000`
 
 ## Configuration
 
-Key settings in `config.py`:
+Key settings in `app.py`:
 
 - `SECRET_KEY`: Flask session security key
-- `SQLALCHEMY_DATABASE_URI`: Database connection string
-- `SNAPSHOT_INTERVAL_MINUTES`: How often to take automatic snapshots (default: 15 minutes)
-- `COINGECKO_API_URL`: CoinGecko API endpoint
+- `SQLALCHEMY_DATABASE_URI`: Database connection string (encrypted SQLite in instance folder)
+- `SQLALCHEMY_TRACK_MODIFICATIONS`: SQLAlchemy modification tracking (disabled for performance)
+
+## Database Security
+
+- **Encryption**: Database is encrypted with AES-256 encryption
+- **Authentication**: Password-protected access to database
+- **Instance Folder**: Database stored in `/instance/` folder for security
+- **Migration**: Automatic migration from unencrypted to encrypted databases
 
 ## API Integration
 
-This application uses the **CoinGecko API** (free tier) to fetch:
-- Current cryptocurrency prices
-- 24-hour price changes
-- Cryptocurrency metadata (names, symbols, logos)
+This application uses **multiple cryptocurrency APIs** with automatic fallback:
 
-No API key is required for the free tier, but there are rate limits.
+1. **CoinCap API** (primary)
+2. **CoinGecko API** (fallback)
+3. **CoinPaprika API** (secondary fallback)
+
+Features:
+- **Rate Limiting**: Built-in rate limiting for each API
+- **Automatic Fallback**: Switches to next API if one fails or is rate limited
+- **No API Keys Required**: All APIs work with free tiers
+- **Comprehensive Data**: Prices, 24h changes, metadata, and images
 
 ## Features in Detail
 
@@ -214,26 +249,46 @@ Contributions are welcome! To contribute:
 ## Troubleshooting
 
 ### Database Issues
-- Delete `portfolio_tracker.db` to reset database
-- Reinitialize with `db.create_all()`
+- Encrypted database is stored in `/instance/portfolio_encrypted.db`
+- Delete both `.db` and `.hash` files to reset database
+- Database tables are created automatically on startup
+- Default portfolio "My Portfolio" is created if no portfolios exist
 
-### CoinGecko API Rate Limits
-- Free tier has rate limits
-- Wait before retrying if getting rate limit errors
-- Consider upgrading API tier for production use
+### Multi-API Rate Limits
+- Each API has different rate limits (CoinCap: 200/min, CoinGecko: 10-30/min, CoinPaprika: 60/min)
+- Built-in rate limiting prevents API blocking
+- Automatic fallback ensures data availability
+- Wait if you receive rate limit warnings
+
+### Authentication Issues
+- If you forget your password, you must delete the database and start over
+- Password must be at least 8 characters
+- Database is encrypted - recovery is impossible without password
 
 ### Port Already in Use
 - Change the port in `app.py` or use: `python app.py --port 5001`
 
+## Recent Updates
+
+### Version 2.0 - Security & Multi-API Enhancement
+- **Database Encryption**: Added AES-256 encrypted database with password protection
+- **Multi-API Support**: Integrated CoinCap, CoinGecko, and CoinPaprika APIs with automatic fallback
+- **Automatic Setup**: Database tables and default portfolio created automatically
+- **Enhanced Holdings**: Support for duplicate holdings with notes and display ordering
+- **Rate Limiting**: Built-in rate limiting for all APIs
+- **Instance Folder**: Database properly stored in Flask instance folder
+- **Migration Tool**: Automatic migration from unencrypted to encrypted databases
+
 ## Future Enhancements
 
-- User authentication and multi-user support
+- Multi-user support with individual encrypted databases
 - Advanced analytics and charting
 - Portfolio rebalancing suggestions
 - Tax loss harvesting calculator
 - Email alerts for price movements
 - Mobile application
 - Support for additional asset classes (stocks, commodities)
+- Cloud backup for encrypted databases
 
 ## Support
 For issues, questions, or suggestions, please open an issue on the repository.
