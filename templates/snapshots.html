@@ -157,9 +157,9 @@ function renderSnapshots(snaps) {
         return;
     }
     
-    tbody.innerHTML = snaps.map(s => {
-        const p = portfolios.find(x => x.id === s.portfolio_id);
-        const pName = p ? p.name : 'Unknown';
+tbody.innerHTML = snaps.map(s => {
+        // Use portfolio_name from API response, fallback to lookup if not available
+        const pName = s.portfolio_name || (portfolios.find(p => p.id === s.portfolio_id)?.name || 'Unknown');
         const hCount = (s.holdings_data || []).length;
         
         return `
@@ -205,11 +205,12 @@ function viewSnapshot(id) {
     if (!s) return;
     
     currentSnapshotId = id;
-    const p = portfolios.find(x => x.id === s.portfolio_id);
+    // Use portfolio_name from API response, fallback to lookup if not available
+    const portfolioName = s.portfolio_name || (portfolios.find(p => p.id === s.portfolio_id)?.name || 'Unknown');
     
     document.getElementById('snapshotDetailDate').textContent = formatDate(s.snapshot_date);
     document.getElementById('snapshotDetailValue').textContent = '$' + formatNumber(s.total_value);
-    document.getElementById('snapshotDetailPortfolio').textContent = p ? p.name : 'Unknown';
+    document.getElementById('snapshotDetailPortfolio').textContent = portfolioName;
     
     const list = document.getElementById('snapshotHoldingsList');
     const holdings = s.holdings_data || [];

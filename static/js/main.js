@@ -366,7 +366,7 @@ function setupGlobalButtons() {
         });
     }
     
-    const snapBtn = document.getElementById('takeSnapshotBtn');
+const snapBtn = document.getElementById('takeSnapshotBtn');
     if (snapBtn) {
         snapBtn.addEventListener('click', async function() {
             snapBtn.disabled = true;
@@ -375,6 +375,14 @@ function setupGlobalButtons() {
                 const data = await res.json();
                 if (data.success) {
                     showToast('Snapshots created', 'success');
+                    // Refresh snapshots if we're on the snapshots page
+                    if (typeof loadSnapshots === 'function') {
+                        loadSnapshots();
+                    }
+                    // Refresh portfolio data if we're on portfolio pages
+                    if (typeof loadPortfolioData === 'function') {
+                        loadPortfolioData();
+                    }
                 } else {
                     showToast(data.error || 'Error', 'error');
                 }

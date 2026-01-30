@@ -192,7 +192,8 @@ class DatabaseEncryptionManager:
         try:
             hash_file = self.db_path.replace('.db', '.hash')
             if not os.path.exists(hash_file):
-                return True  # First time setup
+                # If hash file doesn't exist but database does, treat as unauthenticated
+                return os.path.exists(self.db_path) == False
             
             with open(hash_file, 'rb') as f:
                 lines = f.read().split(b'\n')

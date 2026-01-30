@@ -10,7 +10,7 @@ import requests
 import time
 import os
 from functools import wraps
-from database_encryption import db_encryption
+from database_encryption import DatabaseEncryptionManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,10 +18,15 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///portfolio_encrypted.db'
+# Use absolute path to avoid Flask's instance folder behavior
+db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'portfolio_encrypted.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+# Initialize database encryption with absolute path
+db_encryption = DatabaseEncryptionManager(db_path)
 
 # Authentication decorator
 def require_auth(f):
@@ -417,9 +422,21 @@ def serialize_snapshot(s):
     except:
         holdings = []
     
+    # Get portfolio name if portfolio relationship exists
+    portfolio_name = None
+    if hasattr(s, 'portfolio') and s.portfolio:
+        portfolio_name = s.portfolio.name
+    elif s.portfolio_id:
+        # Fallback: query portfolio directly
+        portfolio = Portfolio.query.get(s.portfolio_id)
+        portfolio_name = portfolio.name if portfolio else 'Unknown'
+    else:
+        portfolio_name = 'Unknown'
+    
     return {
         'id': s.id,
         'portfolio_id': s.portfolio_id,
+        'portfolio_name': portfolio_name,
         'snapshot_date': s.snapshot_date.isoformat() if s.snapshot_date else None,
         'total_value': float(s.total_value) if s.total_value else 0,
         'holdings_data': holdings,
@@ -533,10 +550,23 @@ def login():
     info = None
     first_time = False
     
-    # Check if database exists
-    if not os.path.exists('portfolio_encrypted.db'):
+    # Check if database and hash file exist
+    db_exists = os.path.exists(db_path)
+    hash_file = db_path.replace('.db', '.hash')
+    hash_exists = os.path.exists(hash_file)
+    
+    if not db_exists and not hash_exists:
         first_time = True
         info = "Creating new encrypted database. Please choose a strong password."
+    elif db_exists and not hash_exists:
+        # Database exists but hash file is missing - corrupted setup
+        first_time = True
+        info = "Database exists but password file is missing. Please re-create your password to continue."
+        # Force user to set password by treating as first-time
+    elif not db_exists and hash_exists:
+        # Hash exists but database doesn't - corrupted setup
+        first_time = True
+        info = "Password file exists but database is missing. Please re-create your database."
     
     if request.method == 'POST':
         password = request.form.get('password')
