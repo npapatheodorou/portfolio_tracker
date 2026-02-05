@@ -807,8 +807,10 @@ textarea.form-control {
 }
 
 .form-select {
-    padding: 10px 16px;
-    font-size: 0.875rem;
+    width: 100%;
+    padding: 12px 16px;
+    font-size: 0.95rem;
+    font-family: inherit;
     background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: var(--radius);
@@ -1446,6 +1448,11 @@ textarea.form-control {
     gap: 16px;
     align-items: flex-end;
     flex-wrap: wrap;
+}
+
+.filters-row .form-control,
+.filters-row .form-select {
+    height: 44px;
 }
 
 .filter-group {

@@ -25,6 +25,21 @@
                     </select>
                 </div>
                 <div class="filter-group">
+                    <label>Order</label>
+                    <select id="orderFilter" class="form-select" onchange="applyFilters()">
+                        <option value="date_desc">Date (New to Old)</option>
+                        <option value="date_asc">Date (Old to New)</option>
+                        <option value="value_desc">Value (High to Low)</option>
+                        <option value="value_asc">Value (Low to High)</option>
+                        <option value="assets_desc">Assets (Most to Least)</option>
+                        <option value="assets_asc">Assets (Least to Most)</option>
+                        <option value="portfolio_az">Portfolio (A to Z)</option>
+                        <option value="portfolio_za">Portfolio (Z to A)</option>
+                        <option value="type_manual_first">Type (Manual First)</option>
+                        <option value="type_auto_first">Type (Auto First)</option>
+                    </select>
+                </div>
+                <div class="filter-group">
                     <label>From</label>
                     <input type="date" id="dateFrom" class="form-control">
                 </div>
@@ -107,6 +122,7 @@
 let allSnapshots = [];
 let portfolios = [];
 let currentSnapshotId = null;
+let currentOrder = 'date_desc';
 
 document.addEventListener('DOMContentLoaded', function() {
     loadPortfolios();
@@ -133,11 +149,15 @@ async function loadSnapshots() {
         const res = await fetch('/api/snapshots');
         allSnapshots = await res.json();
         if (!Array.isArray(allSnapshots)) allSnapshots = [];
-        renderSnapshots(allSnapshots);
+        applyFilters();
     } catch (e) {
         console.error(e);
         showToast('Error loading snapshots', 'error');
     }
+}
+
+function getPortfolioName(snapshot) {
+    return snapshot.portfolio_name || (portfolios.find(p => p.id === snapshot.portfolio_id)?.name || 'Unknown');
 }
 
 function renderSnapshots(snaps) {
@@ -159,7 +179,7 @@ function renderSnapshots(snaps) {
     
 tbody.innerHTML = snaps.map(s => {
         // Use portfolio_name from API response, fallback to lookup if not available
-        const pName = s.portfolio_name || (portfolios.find(p => p.id === s.portfolio_id)?.name || 'Unknown');
+        const pName = getPortfolioName(s);
         const hCount = (s.holdings_data || []).length;
         
         return `
@@ -184,20 +204,70 @@ function applyFilters() {
     const pId = document.getElementById('portfolioFilter').value;
     const from = document.getElementById('dateFrom').value;
     const to = document.getElementById('dateTo').value;
+    currentOrder = document.getElementById('orderFilter').value || 'date_desc';
     
     let filtered = [...allSnapshots];
     if (pId) filtered = filtered.filter(s => s.portfolio_id === parseInt(pId));
     if (from) filtered = filtered.filter(s => s.snapshot_date >= from);
     if (to) filtered = filtered.filter(s => s.snapshot_date <= to);
-    
+
+    filtered = sortSnapshots(filtered, currentOrder);
     renderSnapshots(filtered);
+}
+
+function sortSnapshots(snaps, order) {
+    const sorted = [...snaps];
+    const byDate = (a, b) => (a.snapshot_date || '').localeCompare(b.snapshot_date || '');
+    const byValue = (a, b) => (a.total_value || 0) - (b.total_value || 0);
+    const byAssets = (a, b) => ((a.holdings_data || []).length - (b.holdings_data || []).length);
+    const byPortfolio = (a, b) => getPortfolioName(a).localeCompare(getPortfolioName(b));
+    const byType = (a, b) => (a.is_manual === b.is_manual ? 0 : a.is_manual ? -1 : 1);
+
+    switch (order) {
+        case 'date_asc':
+            sorted.sort(byDate);
+            break;
+        case 'date_desc':
+            sorted.sort((a, b) => byDate(b, a));
+            break;
+        case 'value_asc':
+            sorted.sort(byValue);
+            break;
+        case 'value_desc':
+            sorted.sort((a, b) => byValue(b, a));
+            break;
+        case 'assets_asc':
+            sorted.sort(byAssets);
+            break;
+        case 'assets_desc':
+            sorted.sort((a, b) => byAssets(b, a));
+            break;
+        case 'portfolio_az':
+            sorted.sort(byPortfolio);
+            break;
+        case 'portfolio_za':
+            sorted.sort((a, b) => byPortfolio(b, a));
+            break;
+        case 'type_manual_first':
+            sorted.sort(byType);
+            break;
+        case 'type_auto_first':
+            sorted.sort((a, b) => byType(b, a));
+            break;
+        default:
+            sorted.sort((a, b) => byDate(b, a));
+    }
+
+    return sorted;
 }
 
 function clearFilters() {
     document.getElementById('portfolioFilter').value = '';
+    document.getElementById('orderFilter').value = 'date_desc';
     document.getElementById('dateFrom').value = '';
     document.getElementById('dateTo').value = '';
-    renderSnapshots(allSnapshots);
+    currentOrder = 'date_desc';
+    renderSnapshots(sortSnapshots(allSnapshots, currentOrder));
 }
 
 function viewSnapshot(id) {
@@ -206,7 +276,7 @@ function viewSnapshot(id) {
     
     currentSnapshotId = id;
     // Use portfolio_name from API response, fallback to lookup if not available
-    const portfolioName = s.portfolio_name || (portfolios.find(p => p.id === s.portfolio_id)?.name || 'Unknown');
+    const portfolioName = getPortfolioName(s);
     
     document.getElementById('snapshotDetailDate').textContent = formatDate(s.snapshot_date);
     document.getElementById('snapshotDetailValue').textContent = '$' + formatNumber(s.total_value);
